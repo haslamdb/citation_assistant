@@ -1,0 +1,9 @@
+{
+  "david": {
+    "username": "david",
+    "email": "dbhaslam@gmail.com",
+    "full_name": "David",
+    "hashed_password": "$2b$12$BaZPkTiPSlGtfImGXSIgGOPdcQAHKzFIZtshTcOXoT6usAHWZaRXa",
+    "disabled": false
+  }
+}

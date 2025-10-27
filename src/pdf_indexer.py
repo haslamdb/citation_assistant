@@ -1,0 +1,232 @@
+#!/usr/bin/env python3
+"""
+PDF Indexer for Citation Assistant
+Incrementally indexes PDF files from EndNote library into ChromaDB
+"""
+
+import os
+import json
+import hashlib
+from pathlib import Path
+from typing import List, Dict, Tuple
+import pymupdf  # PyMuPDF
+from sentence_transformers import SentenceTransformer
+import chromadb
+from chromadb.config import Settings
+from tqdm import tqdm
+
+
+class PDFIndexer:
+    """Incrementally index PDFs into ChromaDB with change tracking"""
+
+    def __init__(
+        self,
+        endnote_pdf_dir: str,
+        embeddings_dir: str,
+        collection_name: str = "research_papers",
+        embedding_model: str = "all-MiniLM-L6-v2"
+    ):
+        self.endnote_pdf_dir = Path(endnote_pdf_dir)
+        self.embeddings_dir = Path(embeddings_dir)
+        self.collection_name = collection_name
+
+        # Track indexed files
+        self.index_state_file = self.embeddings_dir / "index_state.json"
+        self.indexed_files = self._load_index_state()
+
+        # Initialize embedding model
+        print(f"Loading embedding model: {embedding_model}")
+        self.embedding_model = SentenceTransformer(embedding_model)
+
+        # Initialize ChromaDB
+        self.embeddings_dir.mkdir(parents=True, exist_ok=True)
+        self.client = chromadb.PersistentClient(
+            path=str(self.embeddings_dir),
+            settings=Settings(anonymized_telemetry=False)
+        )
+        self.collection = self.client.get_or_create_collection(
+            name=self.collection_name,
+            metadata={"description": "EndNote research papers"}
+        )
+
+    def _load_index_state(self) -> Dict[str, str]:
+        """Load state of previously indexed files"""
+        if self.index_state_file.exists():
+            with open(self.index_state_file, 'r') as f:
+                return json.load(f)
+        return {}
+
+    def _save_index_state(self):
+        """Save state of indexed files"""
+        self.embeddings_dir.mkdir(parents=True, exist_ok=True)
+        with open(self.index_state_file, 'w') as f:
+            json.dump(self.indexed_files, f, indent=2)
+
+    def _get_file_hash(self, filepath: Path) -> str:
+        """Get MD5 hash of file for change detection"""
+        hash_md5 = hashlib.md5()
+        with open(filepath, "rb") as f:
+            for chunk in iter(lambda: f.read(4096), b""):
+                hash_md5.update(chunk)
+        return hash_md5.hexdigest()
+
+    def _extract_text_from_pdf(self, pdf_path: Path) -> str:
+        """Extract text from PDF using PyMuPDF"""
+        try:
+            doc = pymupdf.open(pdf_path)
+            text = ""
+            for page in doc:
+                text += page.get_text()
+            doc.close()
+            return text.strip()
+        except Exception as e:
+            print(f"Error extracting text from {pdf_path.name}: {e}")
+            return ""
+
+    def _chunk_text(self, text: str, chunk_size: int = 1000, overlap: int = 200) -> List[str]:
+        """Split text into overlapping chunks for better retrieval"""
+        if not text:
+            return []
+
+        chunks = []
+        start = 0
+        text_len = len(text)
+
+        while start < text_len:
+            end = start + chunk_size
+            chunk = text[start:end]
+            chunks.append(chunk)
+            start += chunk_size - overlap
+
+        return chunks
+
+    def find_new_or_modified_pdfs(self) -> List[Tuple[Path, str]]:
+        """Find PDFs that are new or have been modified"""
+        new_or_modified = []
+
+        if not self.endnote_pdf_dir.exists():
+            print(f"EndNote PDF directory not found: {self.endnote_pdf_dir}")
+            return new_or_modified
+
+        # Recursively find all PDFs
+        pdf_files = list(self.endnote_pdf_dir.rglob("*.pdf"))
+        print(f"Found {len(pdf_files)} PDF files in EndNote library")
+
+        for pdf_path in pdf_files:
+            file_key = str(pdf_path.relative_to(self.endnote_pdf_dir))
+            current_hash = self._get_file_hash(pdf_path)
+
+            # Check if new or modified
+            if file_key not in self.indexed_files or self.indexed_files[file_key] != current_hash:
+                new_or_modified.append((pdf_path, file_key))
+
+        return new_or_modified
+
+    def index_pdf(self, pdf_path: Path, file_key: str) -> int:
+        """Index a single PDF file, returns number of chunks indexed"""
+        print(f"Indexing: {pdf_path.name}")
+
+        # Extract text
+        text = self._extract_text_from_pdf(pdf_path)
+        if not text:
+            print(f"  Skipping (no text extracted)")
+            return 0
+
+        # Chunk text
+        chunks = self._chunk_text(text)
+        if not chunks:
+            print(f"  Skipping (no chunks created)")
+            return 0
+
+        # Generate embeddings
+        embeddings = self.embedding_model.encode(chunks, show_progress_bar=False)
+
+        # Prepare metadata
+        doc_id_base = hashlib.md5(file_key.encode()).hexdigest()[:8]
+        ids = [f"{doc_id_base}_chunk_{i}" for i in range(len(chunks))]
+        metadatas = [
+            {
+                "source": file_key,
+                "filename": pdf_path.name,
+                "chunk_index": i,
+                "total_chunks": len(chunks)
+            }
+            for i in range(len(chunks))
+        ]
+
+        # Add to ChromaDB in batches to avoid size limit
+        # ChromaDB has max batch size of ~5461, so we use 5000 to be safe
+        BATCH_SIZE = 5000
+        embeddings_list = embeddings.tolist()
+
+        for i in range(0, len(chunks), BATCH_SIZE):
+            batch_end = min(i + BATCH_SIZE, len(chunks))
+            self.collection.add(
+                ids=ids[i:batch_end],
+                embeddings=embeddings_list[i:batch_end],
+                documents=chunks[i:batch_end],
+                metadatas=metadatas[i:batch_end]
+            )
+
+        # Update index state
+        file_hash = self._get_file_hash(pdf_path)
+        self.indexed_files[file_key] = file_hash
+
+        print(f"  Indexed {len(chunks)} chunks")
+        return len(chunks)
+
+    def index_all_new(self) -> Dict[str, int]:
+        """Index all new or modified PDFs"""
+        new_or_modified = self.find_new_or_modified_pdfs()
+
+        if not new_or_modified:
+            print("No new or modified PDFs found. Index is up to date!")
+            return {"new_files": 0, "total_chunks": 0}
+
+        print(f"\nFound {len(new_or_modified)} new or modified PDFs to index")
+
+        total_chunks = 0
+        for pdf_path, file_key in tqdm(new_or_modified, desc="Indexing PDFs"):
+            chunks_indexed = self.index_pdf(pdf_path, file_key)
+            total_chunks += chunks_indexed
+
+        # Save state
+        self._save_index_state()
+
+        print(f"\n✓ Indexing complete!")
+        print(f"  Files processed: {len(new_or_modified)}")
+        print(f"  Total chunks indexed: {total_chunks}")
+        print(f"  Total documents in collection: {self.collection.count()}")
+
+        return {
+            "new_files": len(new_or_modified),
+            "total_chunks": total_chunks,
+            "collection_size": self.collection.count()
+        }
+
+    def get_stats(self) -> Dict:
+        """Get indexing statistics"""
+        return {
+            "total_indexed_files": len(self.indexed_files),
+            "collection_size": self.collection.count(),
+            "embeddings_dir": str(self.embeddings_dir),
+            "collection_name": self.collection_name
+        }
+
+
+if __name__ == "__main__":
+    # Example usage
+    indexer = PDFIndexer(
+        endnote_pdf_dir="/home/david/projects/EndNote_Library/PDF",
+        embeddings_dir="/fastpool/rag_embeddings"
+    )
+
+    # Show current stats
+    stats = indexer.get_stats()
+    print("Current Index Stats:")
+    for key, value in stats.items():
+        print(f"  {key}: {value}")
+
+    # Index new/modified PDFs
+    print("\nStarting incremental indexing...")
+    results = indexer.index_all_new()

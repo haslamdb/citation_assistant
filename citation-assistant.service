@@ -1,0 +1,15 @@
+[Unit]
+Description=Citation Assistant Web Service
+After=network.target
+
+[Service]
+Type=simple
+User=david
+WorkingDirectory=/home/david/projects/citation_assistant
+Environment="PATH=/home/david/miniforge3/envs/rag/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=/home/david/miniforge3/envs/rag/bin/python /home/david/projects/citation_assistant/server.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
