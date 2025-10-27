@@ -75,12 +75,18 @@ async def lifespan(app: FastAPI):
         print(f"  Error: {e}")
         assistant = None
 
-    # Initialize indexer
+    # Initialize indexer with Phase 2 semantic chunking
     indexer = PDFIndexer(
         endnote_pdf_dir=ENDNOTE_PDF_DIR,
-        embeddings_dir=EMBEDDINGS_DIR
+        embeddings_dir=EMBEDDINGS_DIR,
+        use_semantic_chunking=True,      # Phase 2 optimization
+        target_chunk_tokens=512,         # Use full PubMedBERT capacity
+        overlap_sentences=2              # Semantic overlap
     )
     print("✓ Indexer initialized")
+    print(f"  • Semantic chunking: {indexer.use_semantic_chunking}")
+    print(f"  • Target chunk size: {indexer.target_chunk_tokens} tokens")
+    print(f"  • Sentence overlap: {indexer.overlap_sentences}")
 
     print("\n⚠ SECURITY ENABLED ⚠")
     print("  - JWT Authentication required")
@@ -208,6 +214,15 @@ async def get_stats(current_user: User = Depends(get_current_active_user)):
         raise HTTPException(status_code=503, detail="Indexer not initialized")
 
     stats = indexer.get_stats()
+
+    # Add Phase 2 optimization info
+    stats["optimizations"] = {
+        "phase1_active": True,
+        "phase2_semantic_chunking": indexer.use_semantic_chunking,
+        "target_chunk_tokens": indexer.target_chunk_tokens,
+        "overlap_sentences": indexer.overlap_sentences
+    }
+
     return stats
 
 

@@ -5,8 +5,17 @@ Search for relevant citations and suggest references for manuscripts
 """
 
 import os
+import sys
 from pathlib import Path
 from typing import List, Dict, Tuple
+
+# Configure model locations before importing models
+try:
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    import model_config  # Sets environment variables
+except ImportError:
+    pass  # Fall back to default locations
+
 from sentence_transformers import SentenceTransformer
 import chromadb
 from chromadb.config import Settings
@@ -21,11 +30,19 @@ class CitationAssistant:
         embeddings_dir: str,
         collection_name: str = "research_papers",
         embedding_model: str = "pritamdeka/S-PubMedBert-MS-MARCO",
-        llm_model: str = "gemma2:27b"
+        llm_model: str = "gemma2:27b",
+        default_fetch_multiplier: int = 50,
+        default_max_fetch: int = 2000,
+        default_keyword_boost: float = 0.7
     ):
         self.embeddings_dir = Path(embeddings_dir)
         self.collection_name = collection_name
         self.llm_model = llm_model
+
+        # Store default search parameters (Phase 1 optimizations)
+        self.default_fetch_multiplier = default_fetch_multiplier
+        self.default_max_fetch = default_max_fetch
+        self.default_keyword_boost = default_keyword_boost
 
         # Initialize embedding model
         print(f"Loading embedding model: {embedding_model}")
@@ -44,7 +61,16 @@ class CitationAssistant:
             print(f"Error: Collection '{self.collection_name}' not found. Please run indexer first.")
             raise e
 
-    def search_papers(self, query: str, n_results: int = 10, boost_haslam: bool = True, boost_keywords: str = "") -> List[Dict]:
+    def search_papers(
+        self,
+        query: str,
+        n_results: int = 10,
+        boost_haslam: bool = True,
+        boost_keywords: str = "",
+        fetch_multiplier: int = None,
+        max_fetch: int = None,
+        keyword_boost_strength: float = None
+    ) -> List[Dict]:
         """Search for relevant papers given a query (deduplicated by filename)
 
         Args:
@@ -52,13 +78,25 @@ class CitationAssistant:
             n_results: Number of unique papers to return
             boost_haslam: If True, boost papers with "Haslam" as author (default: True)
             boost_keywords: Optional comma-separated keywords for aggressive boosting (e.g., "golgicide, brefeldin")
+            fetch_multiplier: Multiplier for initial fetch (None = use default)
+            max_fetch: Maximum chunks to fetch (None = use default)
+            keyword_boost_strength: Boost factor for keyword matches (None = use default)
+                Lower = stronger boost. 0.7 = moderate, 0.5 = strong, 0.1 = very aggressive
         """
+        # Use instance defaults if not specified
+        if fetch_multiplier is None:
+            fetch_multiplier = self.default_fetch_multiplier
+        if max_fetch is None:
+            max_fetch = self.default_max_fetch
+        if keyword_boost_strength is None:
+            keyword_boost_strength = self.default_keyword_boost
+
         # Generate query embedding
         query_embedding = self.embedding_model.encode([query])[0]
 
         # Search ChromaDB with more results to account for deduplication
-        # Fetch more results to find papers with specific keywords
-        fetch_count = min(n_results * 10, 500)
+        # Increased from 10x/500 to 50x/2000 for better coverage
+        fetch_count = min(n_results * fetch_multiplier, max_fetch)
         results = self.collection.query(
             query_embeddings=[query_embedding.tolist()],
             n_results=fetch_count,
@@ -96,7 +134,7 @@ class CitationAssistant:
                     'source': results['metadatas'][0][i]['source'],
                     'chunk_index': results['metadatas'][0][i]['chunk_index'],
                     'distance': distance,
-                    'similarity': 1 - distance,  # Convert distance to similarity
+                    'similarity': 1 / (1 + distance),  # Normalize L2 distance to 0-1 range
                     'has_haslam': has_haslam,
                     'keyword_matches': keyword_matches
                 }
@@ -104,10 +142,11 @@ class CitationAssistant:
         # Apply keyword boost (stronger than Haslam boost for relevance)
         for paper in unique_papers.values():
             if paper['keyword_matches'] > 0:
-                # Aggressively boost papers with keyword matches
-                # Reduce distance significantly for each keyword match
-                paper['distance'] *= 0.1 ** paper['keyword_matches']
-                paper['similarity'] = 1 - paper['distance']
+                # Boost papers with keyword matches
+                # Using configurable exponential boost (default 0.7^n is gentler than old 0.1^n)
+                # This prevents keyword matches from overwhelming semantic similarity
+                paper['distance'] *= keyword_boost_strength ** paper['keyword_matches']
+                paper['similarity'] = 1 / (1 + paper['distance'])
 
         # Apply Haslam boost to distances if enabled
         if boost_haslam:
@@ -115,7 +154,7 @@ class CitationAssistant:
                 if paper['has_haslam']:
                     # Reduce distance by 50% (strong boost for Haslam papers)
                     paper['distance'] = paper['distance'] * 0.5
-                    paper['similarity'] = 1 - paper['distance']
+                    paper['similarity'] = 1 / (1 + paper['distance'])
 
         # Convert to list and sort by distance (best matches first)
         papers = sorted(unique_papers.values(), key=lambda x: x['distance'])
@@ -123,9 +162,27 @@ class CitationAssistant:
         # Return only the requested number of results
         return papers[:n_results]
 
-    def summarize_research(self, query: str, n_papers: int = 5) -> str:
-        """Summarize research findings on a topic with inline citations"""
-        papers = self.search_papers(query, n_results=n_papers)
+    def summarize_research(
+        self,
+        query: str,
+        n_papers: int = 5,
+        fetch_multiplier: int = None,
+        keyword_boost_strength: float = None
+    ) -> str:
+        """Summarize research findings on a topic with inline citations
+
+        Args:
+            query: Search query string
+            n_papers: Number of papers to use for summary
+            fetch_multiplier: Multiplier for initial chunk fetch (None = use default)
+            keyword_boost_strength: Boost factor for keyword matches (None = use default)
+        """
+        papers = self.search_papers(
+            query,
+            n_results=n_papers,
+            fetch_multiplier=fetch_multiplier,
+            keyword_boost_strength=keyword_boost_strength
+        )
 
         if not papers:
             return "No relevant papers found in your library."
@@ -135,7 +192,8 @@ class CitationAssistant:
         reference_list = []
 
         for i, p in enumerate(papers[:n_papers], 1):
-            context_parts.append(f"[{i}] {p['filename']}\nExcerpt: {p['text'][:800]}...")
+            # Send full chunk for maximum context (avg ~2000 chars with semantic chunking)
+            context_parts.append(f"[{i}] {p['filename']}\nExcerpt: {p['text']}")
             reference_list.append(f"[{i}] {p['filename']}")
 
         context = "\n\n".join(context_parts)
@@ -188,7 +246,9 @@ After your summary, include a "References" section listing all cited papers."""
     def suggest_citations_for_manuscript(
         self,
         manuscript_text: str,
-        n_suggestions_per_statement: int = 3
+        n_suggestions_per_statement: int = 3,
+        fetch_multiplier: int = None,
+        keyword_boost_strength: float = None
     ) -> List[Dict]:
         """
         Analyze manuscript and suggest relevant citations
@@ -233,7 +293,12 @@ Be concise and specific. Focus on factual claims, methodological choices, and as
         # Find relevant papers for each claim
         suggestions = []
         for claim in claims:
-            papers = self.search_papers(claim, n_results=n_suggestions_per_statement)
+            papers = self.search_papers(
+                claim,
+                n_results=n_suggestions_per_statement,
+                fetch_multiplier=fetch_multiplier,
+                keyword_boost_strength=keyword_boost_strength
+            )
 
             if papers:
                 # Group by unique filename (deduplicate chunks from same paper)
@@ -281,7 +346,9 @@ Be concise and specific. Focus on factual claims, methodological choices, and as
         style: str = "academic",
         length: str = "long",
         n_papers: int = 15,
-        keywords: str = ""
+        keywords: str = "",
+        fetch_multiplier: int = None,
+        keyword_boost_strength: float = None
     ) -> str:
         """
         Write a comprehensive document on a topic using only papers from the library
@@ -292,12 +359,20 @@ Be concise and specific. Focus on factual claims, methodological choices, and as
             length: Document length - "short" (~500 words), "medium" (~1000 words), "long" (~2000+ words)
             n_papers: Number of papers to use as sources (default: 15)
             keywords: Optional comma-separated keywords for aggressive boosting (e.g., "golgicide, brefeldin")
+            fetch_multiplier: Multiplier for initial chunk fetch (None = use default)
+            keyword_boost_strength: Boost factor for keyword matches (None = use default)
 
         Returns:
             Formatted document with inline citations and references
         """
         # Search for relevant papers
-        papers = self.search_papers(topic, n_results=n_papers, boost_keywords=keywords)
+        papers = self.search_papers(
+            topic,
+            n_results=n_papers,
+            boost_keywords=keywords,
+            fetch_multiplier=fetch_multiplier,
+            keyword_boost_strength=keyword_boost_strength
+        )
 
         if not papers:
             return "No relevant papers found in your library for this topic."
@@ -307,8 +382,8 @@ Be concise and specific. Focus on factual claims, methodological choices, and as
         reference_list = []
 
         for i, p in enumerate(papers, 1):
-            # Use longer excerpts for document writing (1000 chars)
-            context_parts.append(f"[{i}] {p['filename']}\nExcerpt: {p['text'][:1000]}...")
+            # Send full chunk for maximum context (avg ~2000 chars with semantic chunking)
+            context_parts.append(f"[{i}] {p['filename']}\nExcerpt: {p['text']}")
             reference_list.append(f"[{i}] {p['filename']}")
 
         context = "\n\n".join(context_parts)
@@ -447,8 +522,8 @@ Write the complete document now:"""
         reference_list = []
 
         for i, p in enumerate(papers, 1):
-            # Use longer excerpts for document writing (1000 chars)
-            context_parts.append(f"[{i}] {p['filename']}\nExcerpt: {p['text'][:1000]}...")
+            # Send full chunk for maximum context (avg ~2000 chars with semantic chunking)
+            context_parts.append(f"[{i}] {p['filename']}\nExcerpt: {p['text']}")
             reference_list.append(f"[{i}] {p['filename']}")
 
         context = "\n\n".join(context_parts)

@@ -5,15 +5,25 @@ Incrementally indexes PDF files from EndNote library into ChromaDB
 """
 
 import os
+import sys
 import json
 import hashlib
 from pathlib import Path
 from typing import List, Dict, Tuple
+
+# Configure model locations before importing models
+try:
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    import model_config  # Sets environment variables
+except ImportError:
+    pass  # Fall back to default locations
+
 import pymupdf  # PyMuPDF
 from sentence_transformers import SentenceTransformer
 import chromadb
 from chromadb.config import Settings
 from tqdm import tqdm
+import re
 
 
 class PDFIndexer:
@@ -24,11 +34,17 @@ class PDFIndexer:
         endnote_pdf_dir: str,
         embeddings_dir: str,
         collection_name: str = "research_papers",
-        embedding_model: str = "pritamdeka/S-PubMedBert-MS-MARCO"
+        embedding_model: str = "pritamdeka/S-PubMedBert-MS-MARCO",
+        use_semantic_chunking: bool = True,
+        target_chunk_tokens: int = 512,
+        overlap_sentences: int = 2
     ):
         self.endnote_pdf_dir = Path(endnote_pdf_dir)
         self.embeddings_dir = Path(embeddings_dir)
         self.collection_name = collection_name
+        self.use_semantic_chunking = use_semantic_chunking
+        self.target_chunk_tokens = target_chunk_tokens
+        self.overlap_sentences = overlap_sentences
 
         # Track indexed files
         self.index_state_file = self.embeddings_dir / "index_state.json"
@@ -84,7 +100,7 @@ class PDFIndexer:
             return ""
 
     def _chunk_text(self, text: str, chunk_size: int = 1000, overlap: int = 200) -> List[str]:
-        """Split text into overlapping chunks for better retrieval"""
+        """Split text into overlapping chunks for better retrieval (DEPRECATED - use _chunk_text_semantic)"""
         if not text:
             return []
 
@@ -97,6 +113,97 @@ class PDFIndexer:
             chunk = text[start:end]
             chunks.append(chunk)
             start += chunk_size - overlap
+
+        return chunks
+
+    def _simple_sentence_tokenize(self, text: str) -> List[str]:
+        """
+        Simple sentence tokenizer using regex (no external dependencies)
+        Handles common sentence boundaries in scientific text
+        """
+        # Replace newlines with spaces but preserve paragraph breaks
+        text = re.sub(r'\n\s*\n', ' <PARA> ', text)
+        text = re.sub(r'\n', ' ', text)
+
+        # Split on sentence boundaries
+        # This regex handles common abbreviations and citations
+        sentences = re.split(
+            r'(?<!\w\.\w.)(?<![A-Z][a-z]\.)(?<![A-Z]\.)(?<=\.|\?|\!)\s+(?=[A-Z])',
+            text
+        )
+
+        # Clean up and filter
+        sentences = [s.strip().replace('<PARA>', '\n\n') for s in sentences if s.strip()]
+        return sentences
+
+    def _count_tokens_approx(self, text: str) -> int:
+        """
+        Approximate token count without loading full tokenizer
+        Scientific text averages ~4 chars per token for BERT models
+        """
+        return len(text) // 4
+
+    def _chunk_text_semantic(
+        self,
+        text: str,
+        target_tokens: int = None,
+        overlap_sentences: int = None
+    ) -> List[str]:
+        """
+        Split text into semantic chunks on sentence boundaries
+
+        Args:
+            text: Text to chunk
+            target_tokens: Target tokens per chunk (default: use instance setting)
+            overlap_sentences: Number of sentences to overlap (default: use instance setting)
+
+        Returns:
+            List of text chunks with sentence-level boundaries
+        """
+        if not text:
+            return []
+
+        if target_tokens is None:
+            target_tokens = self.target_chunk_tokens
+        if overlap_sentences is None:
+            overlap_sentences = self.overlap_sentences
+
+        # Tokenize into sentences
+        sentences = self._simple_sentence_tokenize(text)
+
+        if not sentences:
+            return []
+
+        chunks = []
+        current_chunk = []
+        current_tokens = 0
+
+        for i, sentence in enumerate(sentences):
+            sent_tokens = self._count_tokens_approx(sentence)
+
+            # If single sentence exceeds target, include it anyway (don't split mid-sentence)
+            if sent_tokens > target_tokens and not current_chunk:
+                chunks.append(sentence)
+                continue
+
+            # If adding this sentence exceeds target and we have content, save chunk
+            if current_tokens + sent_tokens > target_tokens and current_chunk:
+                chunks.append(" ".join(current_chunk))
+
+                # Start new chunk with overlap (last N sentences)
+                if len(current_chunk) > overlap_sentences:
+                    current_chunk = current_chunk[-overlap_sentences:]
+                    current_tokens = sum(self._count_tokens_approx(s) for s in current_chunk)
+                else:
+                    current_chunk = []
+                    current_tokens = 0
+
+            current_chunk.append(sentence)
+            current_tokens += sent_tokens
+
+        # Add final chunk
+        if current_chunk:
+            chunks.append(" ".join(current_chunk))
 
         return chunks
 
@@ -146,8 +253,14 @@ class PDFIndexer:
             print(f"  Skipping (no text extracted)")
             return 0
 
-        # Chunk text
-        chunks = self._chunk_text(text)
+        # Chunk text (use semantic or character-based)
+        if self.use_semantic_chunking:
+            chunks = self._chunk_text_semantic(text)
+            chunking_method = "semantic"
+        else:
+            chunks = self._chunk_text(text)
+            chunking_method = "character"
+
         if not chunks:
             print(f"  Skipping (no chunks created)")
             return 0
@@ -163,7 +276,9 @@ class PDFIndexer:
                 "source": file_key,
                 "filename": pdf_path.name,
                 "chunk_index": i,
-                "total_chunks": len(chunks)
+                "total_chunks": len(chunks),
+                "chunking_method": chunking_method,
+                "chunk_size_chars": len(chunks[i])
             }
             for i in range(len(chunks))
         ]
