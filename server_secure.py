@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 from typing import List, Optional
 from datetime import timedelta
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, status
 from fastapi.responses import HTMLResponse, FileResponse
@@ -47,29 +48,6 @@ ALLOWED_HOSTS = [
     "*.local",        # Local network hostnames
 ]
 
-# Initialize FastAPI app
-app = FastAPI(
-    title="Citation Assistant API (Secure)",
-    description="AI-powered citation suggestions with authentication",
-    version="2.0.0"
-)
-
-# Security middleware - commented out for local network flexibility
-# For production with fixed IPs, uncomment and specify exact hosts
-# app.add_middleware(
-#     TrustedHostMiddleware,
-#     allowed_hosts=ALLOWED_HOSTS
-# )
-
-# CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://192.168.1.163:8000", "http://localhost:8000"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 # Thread pool for CPU-intensive tasks
 executor = ThreadPoolExecutor(max_workers=2)
 
@@ -78,28 +56,10 @@ indexer = None
 assistant = None
 
 
-# Pydantic models
-class SearchQuery(BaseModel):
-    query: str
-    n_results: int = 10
-
-
-class SummarizeQuery(BaseModel):
-    query: str
-    n_papers: int = 5
-
-
-class WriteQuery(BaseModel):
-    topic: str
-    keywords: str = ""       # Optional comma-separated keywords for aggressive boosting
-    style: str = "academic"  # "academic" or "grant"
-    length: str = "long"     # "short", "medium", or "long"
-    n_papers: int = 15
-
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize citation assistant on server startup"""
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage application lifespan: startup and shutdown"""
+    # Startup
     global indexer, assistant
 
     print("=" * 60)
@@ -128,6 +88,56 @@ async def startup_event():
     print("  - Password hashing (bcrypt)")
     print("\nServer ready!")
     print("=" * 60)
+
+    yield  # Server runs
+
+    # Shutdown
+    executor.shutdown(wait=True)
+    print("\nShutting down Citation Assistant Server...")
+
+
+# Initialize FastAPI app with lifespan
+app = FastAPI(
+    title="Citation Assistant API (Secure)",
+    description="AI-powered citation suggestions with authentication",
+    version="2.0.0",
+    lifespan=lifespan
+)
+
+# Security middleware - commented out for local network flexibility
+# For production with fixed IPs, uncomment and specify exact hosts
+# app.add_middleware(
+#     TrustedHostMiddleware,
+#     allowed_hosts=ALLOWED_HOSTS
+# )
+
+# CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://192.168.1.163:8000", "http://localhost:8000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# Pydantic models
+class SearchQuery(BaseModel):
+    query: str
+    n_results: int = 10
+
+
+class SummarizeQuery(BaseModel):
+    query: str
+    n_papers: int = 5
+
+
+class WriteQuery(BaseModel):
+    topic: str
+    keywords: str = ""       # Optional comma-separated keywords for aggressive boosting
+    style: str = "academic"  # "academic" or "grant"
+    length: str = "long"     # "short", "medium", or "long"
+    n_papers: int = 15
 
 
 @app.get("/", response_class=HTMLResponse)

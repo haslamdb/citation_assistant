@@ -23,8 +23,15 @@ SECRET_KEY = os.getenv("JWT_SECRET_KEY", secrets.token_urlsafe(32))
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 hours
 
-# Password hashing
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# Password hashing - suppress bcrypt version warning
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="passlib")
+
+pwd_context = CryptContext(
+    schemes=["bcrypt"],
+    deprecated="auto",
+    bcrypt__rounds=12  # Explicitly set rounds to avoid version detection
+)
 
 # HTTP Bearer token security
 security = HTTPBearer()
