@@ -24,7 +24,7 @@ class PDFIndexer:
         endnote_pdf_dir: str,
         embeddings_dir: str,
         collection_name: str = "research_papers",
-        embedding_model: str = "all-MiniLM-L6-v2"
+        embedding_model: str = "pritamdeka/S-PubMedBert-MS-MARCO"
     ):
         self.endnote_pdf_dir = Path(endnote_pdf_dir)
         self.embeddings_dir = Path(embeddings_dir)
@@ -108,13 +108,27 @@ class PDFIndexer:
             print(f"EndNote PDF directory not found: {self.endnote_pdf_dir}")
             return new_or_modified
 
-        # Recursively find all PDFs
+        # Recursively find all PDFs (including OneDrive sync conflict files with ..path* suffix)
         pdf_files = list(self.endnote_pdf_dir.rglob("*.pdf"))
+        pdf_files.extend(self.endnote_pdf_dir.rglob("*.pdf..path*"))
         print(f"Found {len(pdf_files)} PDF files in EndNote library")
 
         for pdf_path in pdf_files:
-            file_key = str(pdf_path.relative_to(self.endnote_pdf_dir))
-            current_hash = self._get_file_hash(pdf_path)
+            # Skip if file doesn't actually exist (broken symlink)
+            if not pdf_path.exists():
+                print(f"  Skipping (not found): {pdf_path.name}")
+                continue
+
+            # Get relative path and normalize file key (strip ..path* suffix from OneDrive conflicts)
+            relative_path = str(pdf_path.relative_to(self.endnote_pdf_dir))
+            # Remove OneDrive sync conflict suffix for consistent indexing
+            file_key = relative_path.split('..path')[0] if '..path' in relative_path else relative_path
+
+            try:
+                current_hash = self._get_file_hash(pdf_path)
+            except Exception as e:
+                print(f"  Skipping (error hashing): {pdf_path.name} - {e}")
+                continue
 
             # Check if new or modified
             if file_key not in self.indexed_files or self.indexed_files[file_key] != current_hash:

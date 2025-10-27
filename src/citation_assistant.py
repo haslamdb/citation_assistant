@@ -20,7 +20,7 @@ class CitationAssistant:
         self,
         embeddings_dir: str,
         collection_name: str = "research_papers",
-        embedding_model: str = "all-MiniLM-L6-v2",
+        embedding_model: str = "pritamdeka/S-PubMedBert-MS-MARCO",
         llm_model: str = "gemma2:27b"
     ):
         self.embeddings_dir = Path(embeddings_dir)
