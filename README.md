@@ -1,17 +1,17 @@
 # Citation Assistant
 
-AI-powered citation assistant using your EndNote library with RAG (Retrieval-Augmented Generation).
+AI-powered citation assistant using an EndNote library with RAG (Retrieval-Augmented Generation).
 
 ## Features
 
-- **Incremental Indexing**: Only processes new or modified PDFs from your EndNote library
+- **Incremental Indexing**: Only processes new or modified PDFs from EndNote library
 - **Semantic Search**: Find relevant papers using natural language queries
 - **Research Summarization**: Get AI-generated summaries of research on specific topics
-- **Smart Citations**: Analyze your manuscript and get citation suggestions for specific claims
+- **Smart Citations**: Analyze a manuscript and get citation suggestions for specific claims
 
 ## Architecture
 
-- **Embeddings**: sentence-transformers (all-MiniLM-L6-v2) running on GPU
+- **Embeddings**: sentence-transformers (PubMedBERT) running on GPU
 - **Vector DB**: ChromaDB for fast semantic search
 - **LLM**: Ollama (gemma2:27b) for summarization and analysis
 - **PDF Processing**: PyMuPDF for text extraction
@@ -30,22 +30,22 @@ citation_assistant/
 
 ## Data Locations
 
-- **EndNote Library**: `/home/david/projects/EndNote_Library/`
+- **EndNote Library**: `~/projects/EndNote_Library/`
 - **Vector Embeddings**: `/fastpool/rag_embeddings/`
 - **Index State**: `/fastpool/rag_embeddings/index_state.json`
 
 ## Usage
 
-### 1. Index your EndNote library (first time or after adding papers)
+### 1. Index EndNote library (first time or after adding papers)
 
 ```bash
 mamba activate rag
-cd /home/david/projects/citation_assistant
+cd ~/projects/citation_assistant
 python src/pdf_indexer.py
 ```
 
 This will:
-- Scan your EndNote PDF folder
+- Scan EndNote PDF folder
 - Index only new or modified PDFs
 - Store embeddings in ChromaDB
 - Track indexed files for incremental updates
@@ -58,7 +58,7 @@ from src.citation_assistant import CitationAssistant
 assistant = CitationAssistant(embeddings_dir="/fastpool/rag_embeddings")
 
 # Search for relevant papers
-papers = assistant.search_papers("CRISPR gene editing", n_results=10)
+papers = assistant.search_papers("microbiome AND antibiotic resistance", n_results=10)
 
 for paper in papers:
     print(f"{paper['filename']}: {paper['similarity']:.2%} match")
@@ -67,7 +67,7 @@ for paper in papers:
 ### 3. Summarize research on a topic
 
 ```python
-summary = assistant.summarize_research("microbiome dysbiosis in IBD", n_papers=10)
+summary = assistant.summarize_research("microbiome dysbiosis in BMT", n_papers=10)
 print(summary)
 ```
 
@@ -127,6 +127,6 @@ python src/pdf_indexer.py
 
 **Slow indexing:**
 ```bash
-# Normal for first run with 6,800 PDFs
+# Normal for first run with > 10,000 PDFs
 # Subsequent runs only process new files
 ```
