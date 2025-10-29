@@ -554,11 +554,15 @@
 
             try {
                 const data = await apiCall(`${API_BASE}/api/index`, { method: 'POST' });
+                const failedMsg = data.results.failed_files > 0
+                    ? `<p style="color: #e67e22;">⚠ Failed/skipped files: ${data.results.failed_files} (corrupted or incomplete PDFs)</p>`
+                    : '';
                 document.getElementById('index-results').innerHTML = `
                     <h3>Indexing Complete</h3>
-                    <p>New files: ${data.results.new_files}</p>
-                    <p>Total chunks: ${data.results.total_chunks}</p>
+                    <p>New files processed: ${data.results.new_files}</p>
+                    <p>Total chunks indexed: ${data.results.total_chunks}</p>
                     <p>Collection size: ${data.results.collection_size}</p>
+                    ${failedMsg}
                 `;
                 loadStats();
             } catch (error) {

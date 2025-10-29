@@ -247,62 +247,68 @@ class PDFIndexer:
         """Index a single PDF file, returns number of chunks indexed"""
         print(f"Indexing: {pdf_path.name}")
 
-        # Extract text
-        text = self._extract_text_from_pdf(pdf_path)
-        if not text:
-            print(f"  Skipping (no text extracted)")
+        try:
+            # Extract text
+            text = self._extract_text_from_pdf(pdf_path)
+            if not text:
+                print(f"  Skipping (no text extracted)")
+                return 0
+
+            # Chunk text (use semantic or character-based)
+            if self.use_semantic_chunking:
+                chunks = self._chunk_text_semantic(text)
+                chunking_method = "semantic"
+            else:
+                chunks = self._chunk_text(text)
+                chunking_method = "character"
+
+            if not chunks:
+                print(f"  Skipping (no chunks created)")
+                return 0
+
+            # Generate embeddings
+            embeddings = self.embedding_model.encode(chunks, show_progress_bar=False)
+
+            # Prepare metadata
+            doc_id_base = hashlib.md5(file_key.encode()).hexdigest()[:8]
+            ids = [f"{doc_id_base}_chunk_{i}" for i in range(len(chunks))]
+            metadatas = [
+                {
+                    "source": file_key,
+                    "filename": pdf_path.name,
+                    "chunk_index": i,
+                    "total_chunks": len(chunks),
+                    "chunking_method": chunking_method,
+                    "chunk_size_chars": len(chunks[i])
+                }
+                for i in range(len(chunks))
+            ]
+
+            # Add to ChromaDB in batches to avoid size limit
+            # ChromaDB has max batch size of ~5461, so we use 5000 to be safe
+            BATCH_SIZE = 5000
+            embeddings_list = embeddings.tolist()
+
+            for i in range(0, len(chunks), BATCH_SIZE):
+                batch_end = min(i + BATCH_SIZE, len(chunks))
+                self.collection.add(
+                    ids=ids[i:batch_end],
+                    embeddings=embeddings_list[i:batch_end],
+                    documents=chunks[i:batch_end],
+                    metadatas=metadatas[i:batch_end]
+                )
+
+            # Update index state
+            file_hash = self._get_file_hash(pdf_path)
+            self.indexed_files[file_key] = file_hash
+
+            print(f"  Indexed {len(chunks)} chunks")
+            return len(chunks)
+
+        except Exception as e:
+            print(f"  ERROR indexing {pdf_path.name}: {e}")
+            print(f"  Skipping this file and continuing...")
             return 0
-
-        # Chunk text (use semantic or character-based)
-        if self.use_semantic_chunking:
-            chunks = self._chunk_text_semantic(text)
-            chunking_method = "semantic"
-        else:
-            chunks = self._chunk_text(text)
-            chunking_method = "character"
-
-        if not chunks:
-            print(f"  Skipping (no chunks created)")
-            return 0
-
-        # Generate embeddings
-        embeddings = self.embedding_model.encode(chunks, show_progress_bar=False)
-
-        # Prepare metadata
-        doc_id_base = hashlib.md5(file_key.encode()).hexdigest()[:8]
-        ids = [f"{doc_id_base}_chunk_{i}" for i in range(len(chunks))]
-        metadatas = [
-            {
-                "source": file_key,
-                "filename": pdf_path.name,
-                "chunk_index": i,
-                "total_chunks": len(chunks),
-                "chunking_method": chunking_method,
-                "chunk_size_chars": len(chunks[i])
-            }
-            for i in range(len(chunks))
-        ]
-
-        # Add to ChromaDB in batches to avoid size limit
-        # ChromaDB has max batch size of ~5461, so we use 5000 to be safe
-        BATCH_SIZE = 5000
-        embeddings_list = embeddings.tolist()
-
-        for i in range(0, len(chunks), BATCH_SIZE):
-            batch_end = min(i + BATCH_SIZE, len(chunks))
-            self.collection.add(
-                ids=ids[i:batch_end],
-                embeddings=embeddings_list[i:batch_end],
-                documents=chunks[i:batch_end],
-                metadatas=metadatas[i:batch_end]
-            )
-
-        # Update index state
-        file_hash = self._get_file_hash(pdf_path)
-        self.indexed_files[file_key] = file_hash
-
-        print(f"  Indexed {len(chunks)} chunks")
-        return len(chunks)
 
     def index_all_new(self) -> Dict[str, int]:
         """Index all new or modified PDFs"""
@@ -310,13 +316,21 @@ class PDFIndexer:
 
         if not new_or_modified:
             print("No new or modified PDFs found. Index is up to date!")
-            return {"new_files": 0, "total_chunks": 0}
+            return {
+                "new_files": 0,
+                "total_chunks": 0,
+                "collection_size": self.collection.count(),
+                "failed_files": 0
+            }
 
         print(f"\nFound {len(new_or_modified)} new or modified PDFs to index")
 
         total_chunks = 0
+        failed_files = 0
         for pdf_path, file_key in tqdm(new_or_modified, desc="Indexing PDFs"):
             chunks_indexed = self.index_pdf(pdf_path, file_key)
+            if chunks_indexed == 0:
+                failed_files += 1
             total_chunks += chunks_indexed
 
         # Save state
@@ -324,13 +338,16 @@ class PDFIndexer:
 
         print(f"\n✓ Indexing complete!")
         print(f"  Files processed: {len(new_or_modified)}")
+        print(f"  Files succeeded: {len(new_or_modified) - failed_files}")
+        print(f"  Files failed/skipped: {failed_files}")
         print(f"  Total chunks indexed: {total_chunks}")
         print(f"  Total documents in collection: {self.collection.count()}")
 
         return {
             "new_files": len(new_or_modified),
             "total_chunks": total_chunks,
-            "collection_size": self.collection.count()
+            "collection_size": self.collection.count(),
+            "failed_files": failed_files
         }
 
     def get_stats(self) -> Dict:
