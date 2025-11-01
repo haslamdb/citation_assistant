@@ -232,21 +232,27 @@ async def run_indexing(current_user: User = Depends(get_current_active_user)):
     if not indexer:
         raise HTTPException(status_code=503, detail="Indexer not initialized")
 
-    loop = asyncio.get_event_loop()
-    results = await loop.run_in_executor(executor, indexer.index_all_new)
+    try:
+        loop = asyncio.get_event_loop()
+        results = await loop.run_in_executor(executor, indexer.index_all_new)
 
-    # Reload assistant if needed
-    global assistant
-    if not assistant:
-        try:
-            assistant = CitationAssistant(embeddings_dir=EMBEDDINGS_DIR)
-        except:
-            pass
+        # Reload assistant if needed
+        global assistant
+        if not assistant:
+            try:
+                assistant = CitationAssistant(embeddings_dir=EMBEDDINGS_DIR)
+            except Exception as e:
+                print(f"Warning: Could not reload assistant: {e}")
 
-    return {
-        "status": "completed",
-        "results": results
-    }
+        return {
+            "status": "completed",
+            "results": results
+        }
+    except Exception as e:
+        import traceback
+        error_msg = f"Indexing error: {str(e)}"
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=error_msg)
 
 
 @app.post("/api/search")
