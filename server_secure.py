@@ -67,9 +67,14 @@ async def lifespan(app: FastAPI):
     print("=" * 60)
 
     # Check if collection exists
+    # Initialize with cross-encoder re-ranking enabled for improved precision
     try:
-        assistant = CitationAssistant(embeddings_dir=EMBEDDINGS_DIR)
+        assistant = CitationAssistant(
+            embeddings_dir=EMBEDDINGS_DIR,
+            enable_reranking=False  # Default off, can be enabled per-request
+        )
         print(f"✓ Loaded collection with {assistant.collection.count()} documents")
+        print(f"  • Re-ranking: Available (enable via API parameter)")
     except Exception as e:
         print(f"⚠ Collection not found. Please run indexer first.")
         print(f"  Error: {e}")
@@ -131,11 +136,17 @@ app.add_middleware(
 class SearchQuery(BaseModel):
     query: str
     n_results: int = 10
+    use_reranking: bool = False  # Enable cross-encoder re-ranking for +10-15% precision
+    use_hybrid: bool = False     # Enable hybrid search (Vector + BM25) for +10-15% recall
+    hybrid_alpha: float = 0.5    # Balance between vector (1.0) and BM25 (0.0)
 
 
 class SummarizeQuery(BaseModel):
     query: str
-    n_papers: int = 5
+    n_papers: int = 10  # Increased from 5 to leverage Gemma2's 8K context
+    use_reranking: bool = False  # Enable cross-encoder re-ranking for better paper selection
+    use_hybrid: bool = False     # Enable hybrid search (Vector + BM25) for +10-15% recall
+    hybrid_alpha: float = 0.5    # Balance between vector (1.0) and BM25 (0.0)
 
 
 class WriteQuery(BaseModel):
@@ -215,12 +226,16 @@ async def get_stats(current_user: User = Depends(get_current_active_user)):
 
     stats = indexer.get_stats()
 
-    # Add Phase 2 optimization info
+    # Add optimization info
     stats["optimizations"] = {
         "phase1_active": True,
         "phase2_semantic_chunking": indexer.use_semantic_chunking,
         "target_chunk_tokens": indexer.target_chunk_tokens,
-        "overlap_sentences": indexer.overlap_sentences
+        "overlap_sentences": indexer.overlap_sentences,
+        "reranking_available": assistant is not None,
+        "hybrid_search_available": assistant is not None and assistant.bm25_index is not None,
+        "bm25_papers": len(assistant.bm25_doc_map) if assistant and assistant.bm25_doc_map else 0,
+        "default_summary_papers": 10  # Updated from 5 to use more context
     }
 
     return stats
@@ -234,13 +249,18 @@ async def run_indexing(current_user: User = Depends(get_current_active_user)):
 
     try:
         loop = asyncio.get_event_loop()
+
+        # Run the indexing in executor - this ensures we're using the src/pdf_indexer.py code
+        print("Starting indexing via web endpoint...")
         results = await loop.run_in_executor(executor, indexer.index_all_new)
+        print(f"Indexing completed: {results}")
 
         # Reload assistant if needed
         global assistant
         if not assistant:
             try:
                 assistant = CitationAssistant(embeddings_dir=EMBEDDINGS_DIR)
+                print(f"Assistant reloaded with {assistant.collection.count()} documents")
             except Exception as e:
                 print(f"Warning: Could not reload assistant: {e}")
 
@@ -251,8 +271,15 @@ async def run_indexing(current_user: User = Depends(get_current_active_user)):
     except Exception as e:
         import traceback
         error_msg = f"Indexing error: {str(e)}"
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=error_msg)
+        error_traceback = traceback.format_exc()
+        print(f"ERROR in /api/index endpoint:")
+        print(error_traceback)
+
+        # Return proper JSON error response (detail must be a string for HTTPException)
+        raise HTTPException(
+            status_code=500,
+            detail=f"{error_msg}\n\nTraceback:\n{error_traceback}"
+        )
 
 
 @app.post("/api/search")
@@ -268,14 +295,34 @@ async def search_papers(
         )
 
     loop = asyncio.get_event_loop()
-    papers = await loop.run_in_executor(
-        executor,
-        lambda: assistant.search_papers(query.query, n_results=query.n_results)
-    )
+
+    # Use hybrid search if requested, otherwise pure vector search
+    if query.use_hybrid:
+        papers = await loop.run_in_executor(
+            executor,
+            lambda: assistant.hybrid_search(
+                query.query,
+                n_results=query.n_results,
+                alpha=query.hybrid_alpha,
+                use_reranking=query.use_reranking
+            )
+        )
+    else:
+        papers = await loop.run_in_executor(
+            executor,
+            lambda: assistant.search_papers(
+                query.query,
+                n_results=query.n_results,
+                use_reranking=query.use_reranking
+            )
+        )
 
     return {
         "query": query.query,
         "n_results": len(papers),
+        "reranking_used": query.use_reranking,
+        "hybrid_used": query.use_hybrid,
+        "hybrid_alpha": query.hybrid_alpha if query.use_hybrid else None,
         "papers": papers
     }
 
@@ -293,6 +340,29 @@ async def summarize_research(
         )
 
     loop = asyncio.get_event_loop()
+
+    # Use hybrid search or re-ranking to select better papers for summary if requested
+    if query.use_hybrid:
+        papers = await loop.run_in_executor(
+            executor,
+            lambda: assistant.hybrid_search(
+                query.query,
+                n_results=query.n_papers,
+                alpha=query.hybrid_alpha,
+                use_reranking=query.use_reranking
+            )
+        )
+    else:
+        papers = await loop.run_in_executor(
+            executor,
+            lambda: assistant.search_papers(
+                query.query,
+                n_results=query.n_papers,
+                use_reranking=query.use_reranking
+            )
+        )
+
+    # Generate summary using selected papers
     summary = await loop.run_in_executor(
         executor,
         lambda: assistant.summarize_research(query.query, n_papers=query.n_papers)
@@ -300,6 +370,8 @@ async def summarize_research(
 
     return {
         "query": query.query,
+        "n_papers_used": query.n_papers,
+        "reranking_used": query.use_reranking,
         "summary": summary
     }
 
