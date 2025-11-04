@@ -343,7 +343,8 @@ class CitationAssistant:
         query: str,
         n_papers: int = 10,
         fetch_multiplier: int = None,
-        keyword_boost_strength: float = None
+        keyword_boost_strength: float = None,
+        llm_model: str = None
     ) -> str:
         """Summarize research findings on a topic with inline citations
 
@@ -405,9 +406,11 @@ IMPORTANT:
 After your summary, include a "References" section listing all cited papers."""
 
         # Query Ollama
-        print(f"\nQuerying {self.llm_model}...")
+        # Use provided model or fall back to instance default
+        model_to_use = llm_model if llm_model else self.llm_model
+        print(f"\nQuerying {model_to_use}...")
         response = ollama.chat(
-            model=self.llm_model,
+            model=model_to_use,
             messages=[{'role': 'user', 'content': prompt}]
         )
 
@@ -424,7 +427,9 @@ After your summary, include a "References" section listing all cited papers."""
         manuscript_text: str,
         n_suggestions_per_statement: int = 3,
         fetch_multiplier: int = None,
-        keyword_boost_strength: float = None
+        keyword_boost_strength: float = None,
+        llm_model: str = None,
+        use_reranking: bool = False
     ) -> List[Dict]:
         """
         Analyze manuscript and suggest relevant citations
@@ -445,9 +450,11 @@ CLAIM: [the specific statement that needs support]
 
 Be concise and specific. Focus on factual claims, methodological choices, and assertions that would typically require scholarly support."""
 
-        print(f"\nAnalyzing manuscript with {self.llm_model}...")
+        # Use provided model or fall back to instance default
+        model_to_use = llm_model if llm_model else self.llm_model
+        print(f"\nAnalyzing manuscript with {model_to_use}...")
         response = ollama.chat(
-            model=self.llm_model,
+            model=model_to_use,
             messages=[{'role': 'user', 'content': prompt}]
         )
 
@@ -473,7 +480,8 @@ Be concise and specific. Focus on factual claims, methodological choices, and as
                 claim,
                 n_results=n_suggestions_per_statement,
                 fetch_multiplier=fetch_multiplier,
-                keyword_boost_strength=keyword_boost_strength
+                keyword_boost_strength=keyword_boost_strength,
+                use_reranking=use_reranking
             )
 
             if papers:
@@ -524,7 +532,11 @@ Be concise and specific. Focus on factual claims, methodological choices, and as
         n_papers: int = 15,
         keywords: str = "",
         fetch_multiplier: int = None,
-        keyword_boost_strength: float = None
+        keyword_boost_strength: float = None,
+        llm_model: str = None,
+        search_method: str = "multi_chunk",
+        use_reranking: bool = False,
+        chunks_per_paper: int = 3
     ) -> str:
         """
         Write a comprehensive document on a topic using only papers from the library
@@ -537,18 +549,48 @@ Be concise and specific. Focus on factual claims, methodological choices, and as
             keywords: Optional comma-separated keywords for aggressive boosting (e.g., "golgicide, brefeldin")
             fetch_multiplier: Multiplier for initial chunk fetch (None = use default)
             keyword_boost_strength: Boost factor for keyword matches (None = use default)
+            llm_model: LLM model to use for generation
+            search_method: Method for searching papers - "default", "multi_chunk", "factual"
+            use_reranking: If True, use cross-encoder re-ranking for better precision
 
         Returns:
             Formatted document with inline citations and references
         """
-        # Search for relevant papers
-        papers = self.search_papers(
-            topic,
-            n_results=n_papers,
-            boost_keywords=keywords,
-            fetch_multiplier=fetch_multiplier,
-            keyword_boost_strength=keyword_boost_strength
-        )
+        # Search for relevant papers using specified method
+        if search_method == "multi_chunk":
+            # Build kwargs dict for optional parameters
+            kwargs = {}
+            if fetch_multiplier is not None:
+                kwargs['fetch_multiplier'] = fetch_multiplier
+            kwargs['use_reranking'] = use_reranking
+            
+            papers = self.search_papers_multi_chunk(
+                topic,
+                n_results=n_papers,
+                chunks_per_paper=chunks_per_paper,
+                **kwargs
+            )
+        elif search_method == "factual":
+            # Build kwargs dict for optional parameters
+            kwargs = {}
+            if fetch_multiplier is not None:
+                kwargs['fetch_multiplier'] = fetch_multiplier
+            # Note: factual search doesn't use reranking (has its own keyword boosting)
+                
+            papers = self.search_papers_factual(
+                topic,
+                n_results=n_papers,
+                **kwargs
+            )
+        else:
+            papers = self.search_papers(
+                topic,
+                n_results=n_papers,
+                boost_keywords=keywords,
+                fetch_multiplier=fetch_multiplier,
+                keyword_boost_strength=keyword_boost_strength,
+                use_reranking=use_reranking
+            )
 
         if not papers:
             return "No relevant papers found in your library for this topic."
@@ -646,10 +688,12 @@ Use the EXACT filenames shown above for each [1], [2], [3], etc.
 Write the complete document now:"""
 
         # Query Ollama
-        print(f"\nGenerating {length} {style} document with {self.llm_model}...")
+        # Use provided model or fall back to instance default
+        model_to_use = llm_model if llm_model else self.llm_model
+        print(f"\nGenerating {length} {style} document with {model_to_use}...")
         print(f"Using {len(papers)} papers from your library")
         response = ollama.chat(
-            model=self.llm_model,
+            model=model_to_use,
             messages=[{'role': 'user', 'content': prompt}]
         )
 
@@ -786,10 +830,12 @@ Use the EXACT filenames shown above for each [1], [2], [3], etc.
 Write the complete document now:"""
 
         # Query Ollama
-        print(f"\nGenerating {length} {style} document with {self.llm_model}...")
+        # Use provided model or fall back to instance default
+        model_to_use = llm_model if llm_model else self.llm_model
+        print(f"\nGenerating {length} {style} document with {model_to_use}...")
         print(f"Using {len(papers)} papers from your library")
         response = ollama.chat(
-            model=self.llm_model,
+            model=model_to_use,
             messages=[{'role': 'user', 'content': prompt}]
         )
 
@@ -800,6 +846,247 @@ Write the complete document now:"""
             document += f"\n\n{'='*80}\nREFERENCES\n{'='*80}\n{references}"
 
         return document
+
+    def search_papers_multi_chunk(
+        self,
+        query: str,
+        n_results: int = 10,
+        chunks_per_paper: int = 2,
+        **kwargs
+    ) -> List[Dict]:
+        """
+        Retrieve multiple chunks per paper instead of just the best one.
+        
+        This fixes the golgicide discovery retrieval issue by preserving
+        discovery narratives that score lower than mechanism details.
+        
+        Args:
+            query: Search query
+            n_results: Number of papers to return
+            chunks_per_paper: Chunks per paper to retrieve (recommend 2-3)
+            **kwargs: Additional parameters (fetch_multiplier, max_fetch, use_reranking)
+        
+        Returns:
+            List of dicts with keys: filename, text, similarity, num_chunks
+        """
+        # Use instance defaults if not specified
+        fetch_multiplier = kwargs.get('fetch_multiplier', self.default_fetch_multiplier)
+        max_fetch = kwargs.get('max_fetch', self.default_max_fetch)
+        use_reranking = kwargs.get('use_reranking', self.enable_reranking)
+        
+        # Embed the query
+        query_embedding = self.embedding_model.encode([query])[0]
+        
+        # Fetch more chunks upfront (need more to have options)
+        fetch_count = min(n_results * fetch_multiplier * chunks_per_paper, max_fetch)
+        
+        # Query ChromaDB
+        results = self.collection.query(
+            query_embeddings=[query_embedding.tolist()],
+            n_results=fetch_count,
+            include=["documents", "metadatas", "distances"]
+        )
+        
+        # Group ALL chunks by filename first
+        papers_all_chunks = {}  # filename -> list of ALL chunks
+        
+        for i in range(len(results['ids'][0])):
+            filename = results['metadatas'][0][i]['filename']
+            text = results['documents'][0][i]
+            distance = results['distances'][0][i]
+            chunk_index = results['metadatas'][0][i].get('chunk_index', i)
+            
+            if filename not in papers_all_chunks:
+                papers_all_chunks[filename] = []
+            
+            papers_all_chunks[filename].append({
+                'text': text,
+                'distance': distance,
+                'similarity': 1 / (1 + distance),
+                'chunk_index': chunk_index,
+                'metadata': results['metadatas'][0][i]
+            })
+        
+        # Now for each paper, keep only the BEST chunks_per_paper chunks
+        papers_chunks = {}
+        for filename, chunks in papers_all_chunks.items():
+            # Sort chunks by distance (best first)
+            chunks.sort(key=lambda x: x['distance'])
+            # Keep only the best chunks_per_paper chunks
+            papers_chunks[filename] = chunks[:chunks_per_paper]
+        
+        # Flatten results
+        flat_results = []
+        for filename, chunks in papers_chunks.items():
+            # Find best chunk for this paper (for ranking)
+            best_chunk = min(chunks, key=lambda x: x['distance'])
+            
+            # Combine all chunks with separators and metadata
+            combined_text = "\n\n---[Next Chunk]---\n\n".join([
+                f"[Chunk {c['chunk_index']}]\n{c['text']}"
+                for c in chunks
+            ])
+            
+            flat_results.append({
+                'filename': filename,
+                'text': combined_text,
+                'similarity': best_chunk['similarity'],
+                'distance': best_chunk['distance'],
+                'num_chunks': len(chunks),
+                'source': best_chunk['metadata'].get('source', ''),
+                'has_haslam': 'haslam' in combined_text.lower(),
+                'keyword_matches': sum(1 for term in query.lower().split() 
+                                      if len(term) > 3 and term in combined_text.lower())
+            })
+        
+        # Apply cross-encoder re-ranking if enabled
+        if use_reranking and self.reranker is not None and len(flat_results) > 0:
+            # Re-rank with cross-encoder for improved precision
+            rerank_candidates = flat_results[:min(len(flat_results), n_results * 3)]
+            
+            # Create query-document pairs for cross-encoder
+            pairs = [[query, paper['text']] for paper in rerank_candidates]
+            
+            # Get cross-encoder scores
+            rerank_scores = self.reranker.predict(pairs)
+            
+            # Add re-rank scores to papers
+            for i, paper in enumerate(rerank_candidates):
+                paper['rerank_score'] = float(rerank_scores[i])
+            
+            # Re-sort by cross-encoder scores (descending)
+            flat_results = sorted(rerank_candidates, key=lambda x: x['rerank_score'], reverse=True)
+            
+            # Append remaining papers (not re-ranked) if any
+            if len(flat_results) < len(papers_chunks):
+                remaining = [p for p in flat_results if 'rerank_score' not in p]
+                flat_results.extend(sorted(remaining, key=lambda x: x['distance']))
+        else:
+            # Sort by similarity and return top N
+            flat_results.sort(key=lambda x: x['similarity'], reverse=True)
+        
+        return flat_results[:n_results]
+
+    def search_papers_factual(
+        self,
+        query: str,
+        n_results: int = 10,
+        **kwargs
+    ) -> List[Dict]:
+        """
+        Specialized search for factual/discovery queries.
+        
+        Boosts chunks containing discovery-related keywords:
+        "discovered", "first identified", "novel", "shown", "found"
+        
+        Use this for queries like:
+        - "How was golgicide discovered?"
+        - "First identification of X"
+        - "Discovery of the mechanism"
+        
+        Args:
+            query: Search query
+            n_results: Number of papers to return
+            **kwargs: Additional parameters
+        
+        Returns:
+            List of dicts with keys: filename, text, similarity, num_chunks
+        """
+        # Discovery keywords to boost
+        discovery_keywords = [
+            "discovered", "discovery", "first identified", "first described",
+            "novel", "shown", "found", "identified", "demonstrated",
+            "introduction of", "history of", "screen", "screening",
+            "high-throughput", "isolated", "purified", "synthesized"
+        ]
+        
+        # Use instance defaults if not specified
+        fetch_multiplier = kwargs.get('fetch_multiplier', 100)  # More aggressive for factual
+        max_fetch = kwargs.get('max_fetch', 5000)
+        
+        # Embed query
+        query_embedding = self.embedding_model.encode([query])[0]
+        
+        # Initial retrieval with aggressive fetch
+        fetch_count = min(n_results * fetch_multiplier, max_fetch)
+        
+        results = self.collection.query(
+            query_embeddings=[query_embedding.tolist()],
+            n_results=fetch_count,
+            include=["documents", "metadatas", "distances"]
+        )
+        
+        # Score chunks and boost for discovery keywords
+        papers_chunks = {}
+        
+        for i in range(len(results['ids'][0])):
+            filename = results['metadatas'][0][i]['filename']
+            text = results['documents'][0][i]
+            distance = results['distances'][0][i]
+            
+            # Count keyword matches (case-insensitive)
+            text_lower = text.lower()
+            keyword_matches = 0
+            for keyword in discovery_keywords:
+                if keyword in text_lower:
+                    keyword_matches += text_lower.count(keyword)
+            
+            # Also check for query terms
+            query_terms = set(query.lower().split())
+            query_matches = sum(1 for term in query_terms if len(term) > 3 and term in text_lower)
+            
+            # Adjust distance: reduce (improve rank) for keyword matches
+            adjusted_distance = distance
+            if keyword_matches > 0:
+                # Exponential boost: more keywords = stronger boost
+                adjusted_distance = distance * (0.5 ** min(keyword_matches, 3))
+            if query_matches > 0:
+                adjusted_distance = adjusted_distance * (0.7 ** query_matches)
+            
+            if filename not in papers_chunks:
+                papers_chunks[filename] = []
+            
+            papers_chunks[filename].append({
+                'text': text,
+                'distance': distance,
+                'adjusted_distance': adjusted_distance,
+                'similarity': 1 / (1 + adjusted_distance),
+                'keyword_matches': keyword_matches,
+                'query_matches': query_matches,
+                'metadata': results['metadatas'][0][i]
+            })
+        
+        # Keep best 2 chunks per paper (adjusted ranking)
+        papers_best = {}
+        for filename, chunks in papers_chunks.items():
+            # Sort by adjusted distance
+            chunks.sort(key=lambda x: x['adjusted_distance'])
+            # Take top 2 chunks
+            top_chunks = chunks[:2]
+            
+            # Combine text from multiple chunks
+            combined_text = "\n\n---[Discovery Context]---\n\n".join([c['text'] for c in top_chunks])
+            
+            # Use best chunk's score for ranking
+            best_chunk = top_chunks[0]
+            
+            papers_best[filename] = {
+                'filename': filename,
+                'text': combined_text,
+                'similarity': best_chunk['similarity'],
+                'distance': best_chunk['adjusted_distance'],
+                'num_chunks': len(top_chunks),
+                'keywords_found': sum(c['keyword_matches'] for c in top_chunks),
+                'source': best_chunk['metadata'].get('source', ''),
+                'has_haslam': 'haslam' in combined_text.lower()
+            }
+        
+        # Sort by adjusted similarity
+        sorted_papers = sorted(papers_best.values(),
+                             key=lambda x: x['similarity'],
+                             reverse=True)
+        
+        return sorted_papers[:n_results]
 
 
 

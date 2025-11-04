@@ -71,7 +71,8 @@ async def lifespan(app: FastAPI):
     try:
         assistant = CitationAssistant(
             embeddings_dir=EMBEDDINGS_DIR,
-            enable_reranking=False  # Default off, can be enabled per-request
+            enable_reranking=False,  # Default off, can be enabled per-request
+            llm_model="gemma2:27b"  # Default model, can be overridden per-request
         )
         print(f"✓ Loaded collection with {assistant.collection.count()} documents")
         print(f"  • Re-ranking: Available (enable via API parameter)")
@@ -139,6 +140,8 @@ class SearchQuery(BaseModel):
     use_reranking: bool = False  # Enable cross-encoder re-ranking for +10-15% precision
     use_hybrid: bool = False     # Enable hybrid search (Vector + BM25) for +10-15% recall
     hybrid_alpha: float = 0.5    # Balance between vector (1.0) and BM25 (0.0)
+    llm_model: str = "gemma2:27b"  # Options: gemma2:27b, qwen2.5:72b-instruct-q4_K_M, llama3.1:70b
+    search_method: str = "default"  # Options: default, multi_chunk, factual
 
 
 class SummarizeQuery(BaseModel):
@@ -147,6 +150,8 @@ class SummarizeQuery(BaseModel):
     use_reranking: bool = False  # Enable cross-encoder re-ranking for better paper selection
     use_hybrid: bool = False     # Enable hybrid search (Vector + BM25) for +10-15% recall
     hybrid_alpha: float = 0.5    # Balance between vector (1.0) and BM25 (0.0)
+    llm_model: str = "gemma2:27b"  # Options: gemma2:27b, qwen2.5:72b-instruct-q4_K_M, llama3.1:70b
+    search_method: str = "default"  # Options: default, multi_chunk, factual
 
 
 class WriteQuery(BaseModel):
@@ -155,6 +160,10 @@ class WriteQuery(BaseModel):
     style: str = "academic"  # "academic" or "grant"
     length: str = "long"     # "short", "medium", or "long"
     n_papers: int = 15
+    llm_model: str = "gemma2:27b"  # Options: gemma2:27b, qwen2.5:72b-instruct-q4_K_M, llama3.1:70b
+    search_method: str = "multi_chunk"  # Options: default, multi_chunk, factual
+    use_reranking: bool = False  # Enable cross-encoder re-ranking for better precision
+    chunks_per_paper: int = 3  # Number of chunks per paper for multi-chunk method (2-10)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -259,7 +268,10 @@ async def run_indexing(current_user: User = Depends(get_current_active_user)):
         global assistant
         if not assistant:
             try:
-                assistant = CitationAssistant(embeddings_dir=EMBEDDINGS_DIR)
+                assistant = CitationAssistant(
+                    embeddings_dir=EMBEDDINGS_DIR,
+                    llm_model="gemma2:27b"  # Default model
+                )
                 print(f"Assistant reloaded with {assistant.collection.count()} documents")
             except Exception as e:
                 print(f"Warning: Could not reload assistant: {e}")
@@ -296,8 +308,29 @@ async def search_papers(
 
     loop = asyncio.get_event_loop()
 
-    # Use hybrid search if requested, otherwise pure vector search
-    if query.use_hybrid:
+    # Choose search method based on query parameter
+    if query.search_method == "multi_chunk":
+        # Multi-chunk retrieval for better context
+        papers = await loop.run_in_executor(
+            executor,
+            lambda: assistant.search_papers_multi_chunk(
+                query.query,
+                n_results=query.n_results,
+                chunks_per_paper=2,
+                use_reranking=query.use_reranking
+            )
+        )
+    elif query.search_method == "factual":
+        # Discovery-optimized search with keyword boosting
+        papers = await loop.run_in_executor(
+            executor,
+            lambda: assistant.search_papers_factual(
+                query.query,
+                n_results=query.n_results
+            )
+        )
+    elif query.use_hybrid:
+        # Hybrid search (Vector + BM25)
         papers = await loop.run_in_executor(
             executor,
             lambda: assistant.hybrid_search(
@@ -308,6 +341,7 @@ async def search_papers(
             )
         )
     else:
+        # Default single-chunk search
         papers = await loop.run_in_executor(
             executor,
             lambda: assistant.search_papers(
@@ -341,8 +375,29 @@ async def summarize_research(
 
     loop = asyncio.get_event_loop()
 
-    # Use hybrid search or re-ranking to select better papers for summary if requested
-    if query.use_hybrid:
+    # Choose search method for finding papers
+    if query.search_method == "multi_chunk":
+        # Multi-chunk retrieval for better context
+        papers = await loop.run_in_executor(
+            executor,
+            lambda: assistant.search_papers_multi_chunk(
+                query.query,
+                n_results=query.n_papers,
+                chunks_per_paper=2,
+                use_reranking=query.use_reranking
+            )
+        )
+    elif query.search_method == "factual":
+        # Discovery-optimized search with keyword boosting
+        papers = await loop.run_in_executor(
+            executor,
+            lambda: assistant.search_papers_factual(
+                query.query,
+                n_results=query.n_papers
+            )
+        )
+    elif query.use_hybrid:
+        # Hybrid search for better recall
         papers = await loop.run_in_executor(
             executor,
             lambda: assistant.hybrid_search(
@@ -353,6 +408,7 @@ async def summarize_research(
             )
         )
     else:
+        # Default single-chunk search
         papers = await loop.run_in_executor(
             executor,
             lambda: assistant.search_papers(
@@ -362,10 +418,14 @@ async def summarize_research(
             )
         )
 
-    # Generate summary using selected papers
+    # Generate summary using selected papers with specified model
     summary = await loop.run_in_executor(
         executor,
-        lambda: assistant.summarize_research(query.query, n_papers=query.n_papers)
+        lambda: assistant.summarize_research(
+            query.query, 
+            n_papers=query.n_papers,
+            llm_model=query.llm_model
+        )
     )
 
     return {
@@ -415,6 +475,7 @@ async def suggest_citations(
 async def suggest_citations_text(
     text: str = Form(...),
     n_suggestions: int = Form(3),
+    use_reranking: bool = Form(False),
     current_user: User = Depends(get_current_active_user)
 ):
     """Suggest citations for text content (requires auth)"""
@@ -429,7 +490,8 @@ async def suggest_citations_text(
         executor,
         lambda: assistant.suggest_citations_for_manuscript(
             text,
-            n_suggestions_per_statement=n_suggestions
+            n_suggestions_per_statement=n_suggestions,
+            use_reranking=use_reranking
         )
     )
 
@@ -452,16 +514,36 @@ async def write_document(
         )
 
     loop = asyncio.get_event_loop()
-    document = await loop.run_in_executor(
-        executor,
-        lambda: assistant.write_document(
-            topic=query.topic,
-            style=query.style,
-            length=query.length,
-            n_papers=query.n_papers,
-            keywords=query.keywords
+    
+    try:
+        # Debug logging
+        print(f"DEBUG: Write document request - method: {query.search_method}, model: {query.llm_model}")
+        print(f"DEBUG: Assistant has search_papers_multi_chunk: {hasattr(assistant, 'search_papers_multi_chunk')}")
+        print(f"DEBUG: Assistant has search_papers_factual: {hasattr(assistant, 'search_papers_factual')}")
+        
+        document = await loop.run_in_executor(
+            executor,
+            lambda: assistant.write_document(
+                topic=query.topic,
+                style=query.style,
+                length=query.length,
+                n_papers=query.n_papers,
+                keywords=query.keywords,
+                llm_model=query.llm_model,
+                search_method=query.search_method,
+                use_reranking=query.use_reranking,
+                chunks_per_paper=query.chunks_per_paper
+            )
         )
-    )
+    except Exception as e:
+        import traceback
+        error_traceback = traceback.format_exc()
+        print(f"ERROR in write_document: {str(e)}")
+        print(f"Traceback:\n{error_traceback}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error generating document: {str(e)}"
+        )
 
     return {
         "topic": query.topic,
