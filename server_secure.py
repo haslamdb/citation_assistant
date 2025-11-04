@@ -24,7 +24,7 @@ from concurrent.futures import ThreadPoolExecutor
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from pdf_indexer import PDFIndexer
-from citation_assistant import CitationAssistant
+from citation_assistant import CitationAssistant, GlobalConfig
 from auth import (
     authenticate_user,
     create_access_token,
@@ -67,19 +67,32 @@ async def lifespan(app: FastAPI):
     print("=" * 60)
 
     # Check if collection exists
-    # Initialize with cross-encoder re-ranking enabled for improved precision
+    # Initialize with GlobalConfig for unified parameter management
     try:
+        # Create global config with default settings
+        global_config = GlobalConfig(
+            n_papers=10,
+            chunks_per_paper=1,
+            enable_reranking=False,  # Default off, can be enabled
+            enable_hybrid=True,
+            hybrid_balance=0.5,
+            duplicate_threshold=0.95,
+            llm_model="gemma2:27b"
+        )
+        
         assistant = CitationAssistant(
             embeddings_dir=EMBEDDINGS_DIR,
-            enable_reranking=False,  # Default off, can be enabled per-request
-            llm_model="gemma2:27b"  # Default model, can be overridden per-request
+            config=global_config
         )
         print(f"✓ Loaded collection with {assistant.collection.count()} documents")
-        print(f"  • Re-ranking: Available (enable via API parameter)")
+        print(f"  • Global config initialized")
+        print(f"  • Re-ranking: Available")
+        print(f"  • Hybrid search: Enabled")
     except Exception as e:
         print(f"⚠ Collection not found. Please run indexer first.")
         print(f"  Error: {e}")
         assistant = None
+        global_config = GlobalConfig()  # Create default config anyway
 
     # Initialize indexer with Phase 2 semantic chunking
     indexer = PDFIndexer(
@@ -156,6 +169,20 @@ class SummarizeQuery(BaseModel):
     search_method: str = "default"  # Options: default, multi_chunk, factual
 
 
+class GlobalConfigUpdate(BaseModel):
+    """Global configuration update request"""
+    n_papers: Optional[int] = None
+    chunks_per_paper: Optional[int] = None
+    enable_reranking: Optional[bool] = None
+    enable_hybrid: Optional[bool] = None
+    hybrid_balance: Optional[float] = None
+    duplicate_threshold: Optional[float] = None
+    llm_model: Optional[str] = None
+    keyword_boost_strength: Optional[float] = None
+    entity_boost_strength: Optional[float] = None
+    require_query_terms: Optional[bool] = None
+
+
 class WriteQuery(BaseModel):
     topic: str
     keywords: str = ""       # Optional comma-separated keywords for aggressive boosting
@@ -230,6 +257,35 @@ async def read_users_me(current_user: User = Depends(get_current_active_user)):
     return current_user
 
 
+@app.get("/api/config")
+async def get_config(current_user: User = Depends(get_current_active_user)):
+    """Get current global configuration"""
+    if assistant:
+        return assistant.get_config()
+    else:
+        return global_config.to_dict()
+
+
+@app.post("/api/config")
+async def update_config(
+    update: GlobalConfigUpdate,
+    current_user: User = Depends(get_current_active_user)
+):
+    """Update global configuration"""
+    if assistant:
+        # Update only provided fields
+        update_dict = {k: v for k, v in update.dict().items() if v is not None}
+        assistant.update_config(**update_dict)
+        return {"message": "Configuration updated", "config": assistant.get_config()}
+    else:
+        # Update the global config object directly
+        update_dict = {k: v for k, v in update.dict().items() if v is not None}
+        for key, value in update_dict.items():
+            if hasattr(global_config, key):
+                setattr(global_config, key, value)
+        return {"message": "Configuration updated (assistant not loaded)", "config": global_config.to_dict()}
+
+
 @app.get("/api/stats")
 async def get_stats(current_user: User = Depends(get_current_active_user)):
     """Get indexing statistics (requires auth)"""
@@ -273,7 +329,7 @@ async def run_indexing(current_user: User = Depends(get_current_active_user)):
             try:
                 assistant = CitationAssistant(
                     embeddings_dir=EMBEDDINGS_DIR,
-                    llm_model="gemma2:27b"  # Default model
+                    config=global_config
                 )
                 print(f"Assistant reloaded with {assistant.collection.count()} documents")
             except Exception as e:
@@ -311,50 +367,34 @@ async def search_papers(
 
     loop = asyncio.get_event_loop()
 
-    # Choose search method based on query parameter
+    # Temporarily override config for this search
+    override_config = {
+        'n_papers': query.n_results,
+        'enable_reranking': query.use_reranking,
+        'enable_hybrid': query.use_hybrid,
+        'hybrid_balance': query.hybrid_alpha,
+        'duplicate_threshold': query.duplicate_threshold
+    }
+    
+    # Adjust chunks per paper based on search method
     if query.search_method == "multi_chunk":
-        # Multi-chunk retrieval for better context
-        papers = await loop.run_in_executor(
-            executor,
-            lambda: assistant.search_papers_multi_chunk(
-                query.query,
-                n_results=query.n_results,
-                chunks_per_paper=2,
-                duplicate_threshold=query.duplicate_threshold
-            )
-        )
+        override_config['chunks_per_paper'] = 2
     elif query.search_method == "factual":
-        # Discovery-optimized search with keyword boosting
-        papers = await loop.run_in_executor(
-            executor,
-            lambda: assistant.search_papers_factual(
-                query.query,
-                n_results=query.n_results,
-                duplicate_threshold=query.duplicate_threshold
-            )
-        )
-    elif query.use_hybrid:
-        # Hybrid search (Vector + BM25)
-        papers = await loop.run_in_executor(
-            executor,
-            lambda: assistant.hybrid_search(
-                query.query,
-                n_results=query.n_results,
-                alpha=query.hybrid_alpha,
-                duplicate_threshold=query.duplicate_threshold
-            )
-        )
+        override_config['chunks_per_paper'] = 2
+        override_config['entity_boost_strength'] = 0.05  # Strong boost for entities
     else:
-        # Default single-chunk search
-        papers = await loop.run_in_executor(
-            executor,
-            lambda: assistant.search_papers(
-                query.query,
-                n_results=query.n_results,
-                use_reranking=query.use_reranking,
-                duplicate_threshold=query.duplicate_threshold
-            )
+        override_config['chunks_per_paper'] = 1
+    
+    # Use unified search with temporary overrides
+    papers = await loop.run_in_executor(
+        executor,
+        lambda: assistant.unified_search(
+            query.query,
+            boost_keywords="",
+            boost_haslam=True,
+            override_config=override_config
         )
+    )
 
     return {
         "query": query.query,
@@ -380,58 +420,42 @@ async def summarize_research(
 
     loop = asyncio.get_event_loop()
 
-    # Choose search method for finding papers
+    # Temporarily override config for this search
+    override_config = {
+        'n_papers': query.n_papers,
+        'enable_reranking': query.use_reranking,
+        'enable_hybrid': query.use_hybrid,
+        'hybrid_balance': query.hybrid_alpha,
+        'duplicate_threshold': query.duplicate_threshold,
+        'llm_model': query.llm_model
+    }
+    
+    # Adjust chunks per paper based on search method
     if query.search_method == "multi_chunk":
-        # Multi-chunk retrieval for better context
-        papers = await loop.run_in_executor(
-            executor,
-            lambda: assistant.search_papers_multi_chunk(
-                query.query,
-                n_results=query.n_papers,
-                chunks_per_paper=2,
-                use_reranking=query.use_reranking
-            )
-        )
+        override_config['chunks_per_paper'] = 2
     elif query.search_method == "factual":
-        # Discovery-optimized search with keyword boosting
-        papers = await loop.run_in_executor(
-            executor,
-            lambda: assistant.search_papers_factual(
-                query.query,
-                n_results=query.n_papers
-            )
-        )
-    elif query.use_hybrid:
-        # Hybrid search for better recall
-        papers = await loop.run_in_executor(
-            executor,
-            lambda: assistant.hybrid_search(
-                query.query,
-                n_results=query.n_papers,
-                alpha=query.hybrid_alpha,
-                use_reranking=query.use_reranking
-            )
-        )
+        override_config['chunks_per_paper'] = 2
+        override_config['entity_boost_strength'] = 0.05
     else:
-        # Default single-chunk search
-        papers = await loop.run_in_executor(
+        override_config['chunks_per_paper'] = 1
+    
+    # Apply temporary config and generate summary
+    original_config = {}
+    for key, value in override_config.items():
+        if hasattr(assistant.config, key):
+            original_config[key] = getattr(assistant.config, key)
+            setattr(assistant.config, key, value)
+    
+    try:
+        # Generate summary with updated config
+        summary = await loop.run_in_executor(
             executor,
-            lambda: assistant.search_papers(
-                query.query,
-                n_results=query.n_papers,
-                use_reranking=query.use_reranking
-            )
+            lambda: assistant.summarize_research(query.query)
         )
-
-    # Generate summary using selected papers with specified model
-    summary = await loop.run_in_executor(
-        executor,
-        lambda: assistant.summarize_research(
-            query.query, 
-            n_papers=query.n_papers,
-            llm_model=query.llm_model
-        )
-    )
+    finally:
+        # Restore original config
+        for key, value in original_config.items():
+            setattr(assistant.config, key, value)
 
     return {
         "query": query.query,
@@ -521,24 +545,37 @@ async def write_document(
     loop = asyncio.get_event_loop()
     
     try:
-        # Debug logging
-        print(f"DEBUG: Write document request - method: {query.search_method}, model: {query.llm_model}")
-        print(f"DEBUG: Assistant has search_papers_multi_chunk: {hasattr(assistant, 'search_papers_multi_chunk')}")
-        print(f"DEBUG: Assistant has search_papers_factual: {hasattr(assistant, 'search_papers_factual')}")
+        # Temporarily override config
+        override_config = {
+            'n_papers': query.n_papers,
+            'enable_reranking': query.use_reranking,
+            'duplicate_threshold': query.duplicate_threshold,
+            'llm_model': query.llm_model,
+            'chunks_per_paper': query.chunks_per_paper
+        }
         
-        document = await loop.run_in_executor(
-            executor,
-            lambda: assistant.write_document(
-                topic=query.topic,
-                style=query.style,
-                length=query.length,
-                n_papers=query.n_papers,
-                keywords=query.keywords,
-                llm_model=query.llm_model,
-                search_method=query.search_method,
-                chunks_per_paper=query.chunks_per_paper
+        # Apply temporary config
+        original_config = {}
+        for key, value in override_config.items():
+            if hasattr(assistant.config, key):
+                original_config[key] = getattr(assistant.config, key)
+                setattr(assistant.config, key, value)
+        
+        try:
+            # Generate document with updated config
+            document = await loop.run_in_executor(
+                executor,
+                lambda: assistant.write_document(
+                    topic=query.topic,
+                    style=query.style,
+                    length=query.length,
+                    keywords=query.keywords
+                )
             )
-        )
+        finally:
+            # Restore original config
+            for key, value in original_config.items():
+                setattr(assistant.config, key, value)
     except Exception as e:
         import traceback
         error_traceback = traceback.format_exc()
