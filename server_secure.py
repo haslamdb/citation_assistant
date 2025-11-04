@@ -140,6 +140,7 @@ class SearchQuery(BaseModel):
     use_reranking: bool = False  # Enable cross-encoder re-ranking for +10-15% precision
     use_hybrid: bool = False     # Enable hybrid search (Vector + BM25) for +10-15% recall
     hybrid_alpha: float = 0.5    # Balance between vector (1.0) and BM25 (0.0)
+    duplicate_threshold: float = 0.95  # Duplicate detection threshold (0.8-1.0)
     llm_model: str = "gemma2:27b"  # Options: gemma2:27b, qwen2.5:72b-instruct-q4_K_M, llama3.1:70b
     search_method: str = "default"  # Options: default, multi_chunk, factual
 
@@ -150,6 +151,7 @@ class SummarizeQuery(BaseModel):
     use_reranking: bool = False  # Enable cross-encoder re-ranking for better paper selection
     use_hybrid: bool = False     # Enable hybrid search (Vector + BM25) for +10-15% recall
     hybrid_alpha: float = 0.5    # Balance between vector (1.0) and BM25 (0.0)
+    duplicate_threshold: float = 0.95  # Duplicate detection threshold (0.8-1.0)
     llm_model: str = "gemma2:27b"  # Options: gemma2:27b, qwen2.5:72b-instruct-q4_K_M, llama3.1:70b
     search_method: str = "default"  # Options: default, multi_chunk, factual
 
@@ -160,6 +162,7 @@ class WriteQuery(BaseModel):
     style: str = "academic"  # "academic" or "grant"
     length: str = "long"     # "short", "medium", or "long"
     n_papers: int = 15
+    duplicate_threshold: float = 0.95  # Duplicate detection threshold (0.8-1.0)
     llm_model: str = "gemma2:27b"  # Options: gemma2:27b, qwen2.5:72b-instruct-q4_K_M, llama3.1:70b
     search_method: str = "multi_chunk"  # Options: default, multi_chunk, factual
     use_reranking: bool = False  # Enable cross-encoder re-ranking for better precision
@@ -317,7 +320,7 @@ async def search_papers(
                 query.query,
                 n_results=query.n_results,
                 chunks_per_paper=2,
-                use_reranking=query.use_reranking
+                duplicate_threshold=query.duplicate_threshold
             )
         )
     elif query.search_method == "factual":
@@ -326,7 +329,8 @@ async def search_papers(
             executor,
             lambda: assistant.search_papers_factual(
                 query.query,
-                n_results=query.n_results
+                n_results=query.n_results,
+                duplicate_threshold=query.duplicate_threshold
             )
         )
     elif query.use_hybrid:
@@ -337,7 +341,7 @@ async def search_papers(
                 query.query,
                 n_results=query.n_results,
                 alpha=query.hybrid_alpha,
-                use_reranking=query.use_reranking
+                duplicate_threshold=query.duplicate_threshold
             )
         )
     else:
@@ -347,7 +351,8 @@ async def search_papers(
             lambda: assistant.search_papers(
                 query.query,
                 n_results=query.n_results,
-                use_reranking=query.use_reranking
+                use_reranking=query.use_reranking,
+                duplicate_threshold=query.duplicate_threshold
             )
         )
 
@@ -531,7 +536,6 @@ async def write_document(
                 keywords=query.keywords,
                 llm_model=query.llm_model,
                 search_method=query.search_method,
-                use_reranking=query.use_reranking,
                 chunks_per_paper=query.chunks_per_paper
             )
         )

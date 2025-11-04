@@ -299,6 +299,13 @@
                         <span id="search-alpha-value">0.5</span>
                     </div>
                     <div class="form-group">
+                        <label for="search-duplicate-threshold">
+                            Duplicate Detection Threshold: <span id="search-duplicate-value">0.95</span>
+                            <br><small style="color: #666;">0.8=Aggressive | 0.9=Moderate | 0.95=Conservative | 0.98=Minimal | 1.0=Exact</small>
+                        </label>
+                        <input type="range" id="search-duplicate-threshold" min="0.8" max="1.0" step="0.02" value="0.95" style="width: 100%;">
+                    </div>
+                    <div class="form-group">
                         <label for="search-method">Search Method</label>
                         <select id="search-method" style="width: 100%; padding: 12px; border: 2px solid #ddd; border-radius: 6px; font-size: 16px;">
                             <option value="default">Default (Single Best Chunk)</option>
