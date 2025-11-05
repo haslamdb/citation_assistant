@@ -298,29 +298,6 @@
                         <input type="range" id="search-alpha" min="0" max="1" step="0.1" value="0.5">
                         <span id="search-alpha-value">0.5</span>
                     </div>
-                    <div class="form-group">
-                        <label for="search-duplicate-threshold">
-                            Duplicate Detection Threshold: <span id="search-duplicate-value">0.95</span>
-                            <br><small style="color: #666;">0.8=Aggressive | 0.9=Moderate | 0.95=Conservative | 0.98=Minimal | 1.0=Exact</small>
-                        </label>
-                        <input type="range" id="search-duplicate-threshold" min="0.8" max="1.0" step="0.02" value="0.95" style="width: 100%;">
-                    </div>
-                    <div class="form-group">
-                        <label for="search-method">Search Method</label>
-                        <select id="search-method" style="width: 100%; padding: 12px; border: 2px solid #ddd; border-radius: 6px; font-size: 16px;">
-                            <option value="default">Default (Single Best Chunk)</option>
-                            <option value="multi_chunk">Multi-Chunk (2 chunks/paper, Better Context)</option>
-                            <option value="factual" selected>Discovery-Optimized (Best for "how was X discovered")</option>
-                        </select>
-                    </div>
-                    <div class="form-group">
-                        <label for="search-model">LLM Model</label>
-                        <select id="search-model" style="width: 100%; padding: 12px; border: 2px solid #ddd; border-radius: 6px; font-size: 16px;">
-                            <option value="gemma2:27b" selected>Gemma 2 27B (Fast, Good Quality)</option>
-                            <option value="qwen2.5:72b-instruct-q4_K_M">Qwen 2.5 72B (Slower, Better Quality)</option>
-                            <option value="llama3.1:70b">Llama 3.1 70B (Slower, Best Quality)</option>
-                        </select>
-                    </div>
                     <button type="submit">Search</button>
                 </form>
                 <div id="search-results" class="results"></div>
@@ -354,22 +331,6 @@
                         <label for="summarize-alpha">Hybrid Balance (0=pure BM25, 0.5=balanced, 1.0=pure vector)</label>
                         <input type="range" id="summarize-alpha" min="0" max="1" step="0.1" value="0.5">
                         <span id="summarize-alpha-value">0.5</span>
-                    </div>
-                    <div class="form-group">
-                        <label for="summarize-method">Search Method</label>
-                        <select id="summarize-method" style="width: 100%; padding: 12px; border: 2px solid #ddd; border-radius: 6px; font-size: 16px;">
-                            <option value="default">Default (Single Best Chunk)</option>
-                            <option value="multi_chunk">Multi-Chunk (2 chunks/paper, Better Context)</option>
-                            <option value="factual" selected>Discovery-Optimized (Best for "how was X discovered")</option>
-                        </select>
-                    </div>
-                    <div class="form-group">
-                        <label for="summarize-model">LLM Model</label>
-                        <select id="summarize-model" style="width: 100%; padding: 12px; border: 2px solid #ddd; border-radius: 6px; font-size: 16px;">
-                            <option value="gemma2:27b" selected>Gemma 2 27B (Fast, Good Quality)</option>
-                            <option value="qwen2.5:72b-instruct-q4_K_M">Qwen 2.5 72B (Slower, Better Quality)</option>
-                            <option value="llama3.1:70b">Llama 3.1 70B (Slower, Best Quality)</option>
-                        </select>
                     </div>
                     <button type="submit">Generate Summary</button>
                 </form>
@@ -409,33 +370,6 @@
                         <label for="write-n-papers">Number of Source Papers</label>
                         <input type="number" id="write-n-papers" value="15" min="5" max="100">
                     </div>
-                    <div class="form-group">
-                        <label for="write-method">Search Method</label>
-                        <select id="write-method" style="width: 100%; padding: 12px; border: 2px solid #ddd; border-radius: 6px; font-size: 16px;" onchange="toggleChunksInput()">
-                            <option value="default">Default (Single Best Chunk)</option>
-                            <option value="multi_chunk" selected>Multi-Chunk (Multiple chunks/paper, Better Context)</option>
-                            <option value="factual">Discovery-Optimized (Best for "how was X discovered")</option>
-                        </select>
-                    </div>
-                    <div class="form-group" id="chunks-per-paper-group">
-                        <label for="write-chunks">Chunks per Paper (for Multi-Chunk method)</label>
-                        <input type="number" id="write-chunks" value="5" min="2" max="10" style="width: 100%; padding: 12px; border: 2px solid #ddd; border-radius: 6px; font-size: 16px;">
-                        <small style="color: #666; font-size: 0.9em;">More chunks = better coverage but more tokens. 5 recommended for discovery questions.</small>
-                    </div>
-                    <div class="form-group">
-                        <label for="write-model">LLM Model</label>
-                        <select id="write-model" style="width: 100%; padding: 12px; border: 2px solid #ddd; border-radius: 6px; font-size: 16px;">
-                            <option value="gemma2:27b" selected>Gemma 2 27B (Fast, Good Quality)</option>
-                            <option value="qwen2.5:72b-instruct-q4_K_M">Qwen 2.5 72B (Slower, Better Quality)</option>
-                            <option value="llama3.1:70b">Llama 3.1 70B (Slower, Best Quality)</option>
-                        </select>
-                    </div>
-                    <div class="form-group">
-                        <label>
-                            <input type="checkbox" id="write-reranking" style="margin-right: 8px;">
-                            Enable Cross-Encoder Re-Ranking (better precision, slower)
-                        </label>
-                    </div>
                     <button type="submit">Generate Document</button>
                 </form>
                 <div id="write-results" class="results"></div>
@@ -452,12 +386,6 @@
                     <div class="form-group">
                         <label for="suggest-n">Suggestions Per Statement</label>
                         <input type="text" id="suggest-n" value="3">
-                    </div>
-                    <div class="form-group">
-                        <label>
-                            <input type="checkbox" id="suggest-reranking" style="margin-right: 8px;">
-                            Enable Cross-Encoder Re-Ranking (better precision, slower)
-                        </label>
                     </div>
                     <button type="submit">Get Suggestions</button>
                 </form>
@@ -540,11 +468,10 @@
 
             if (!response.ok) {
                 let errorMsg = 'Request failed';
-                const contentType = response.headers.get("content-type");
-                if (contentType && contentType.includes("application/json")) {
+                try {
                     const error = await response.json();
                     errorMsg = error.detail || errorMsg;
-                } else {
+                } catch (e) {
                     // If response is not JSON (e.g., HTML error page), read as text
                     const errorText = await response.text();
                     console.error('Non-JSON error response:', errorText);
@@ -620,9 +547,7 @@
                         n_results: parseInt(document.getElementById('search-n').value),
                         use_reranking: useReranking,
                         use_hybrid: useHybrid,
-                        hybrid_alpha: hybridAlpha,
-                        llm_model: document.getElementById('search-model').value,
-                        search_method: document.getElementById('search-method').value
+                        hybrid_alpha: hybridAlpha
                     })
                 });
 
@@ -675,9 +600,7 @@
                         n_papers: parseInt(document.getElementById('summarize-n').value),
                         use_reranking: useReranking,
                         use_hybrid: useHybrid,
-                        hybrid_alpha: hybridAlpha,
-                        llm_model: document.getElementById('summarize-model').value,
-                        search_method: document.getElementById('summarize-method').value
+                        hybrid_alpha: hybridAlpha
                     })
                 });
 
@@ -711,11 +634,7 @@
                         keywords: document.getElementById('write-keywords').value,
                         style: document.getElementById('write-style').value,
                         length: document.getElementById('write-length').value,
-                        n_papers: parseInt(document.getElementById('write-n-papers').value),
-                        llm_model: document.getElementById('write-model').value,
-                        search_method: document.getElementById('write-method').value,
-                        use_reranking: document.getElementById('write-reranking').checked,
-                        chunks_per_paper: parseInt(document.getElementById('write-chunks').value)
+                        n_papers: parseInt(document.getElementById('write-n-papers').value)
                     })
                 });
 
@@ -764,7 +683,6 @@
                 const formData = new FormData();
                 formData.append('text', document.getElementById('manuscript-text').value);
                 formData.append('n_suggestions', document.getElementById('suggest-n').value);
-                formData.append('use_reranking', document.getElementById('suggest-reranking').checked);
 
                 const data = await apiCall(`${API_BASE}/api/suggest/text`, {
                     method: 'POST',
@@ -846,25 +764,6 @@
             summarizeAlphaSlider.addEventListener('input', function() {
                 summarizeAlphaValue.textContent = this.value;
             });
-            
-            // Toggle chunks input visibility
-            function toggleChunksInput() {
-                const method = document.getElementById('write-method')?.value;
-                const chunksGroup = document.getElementById('chunks-per-paper-group');
-                if (chunksGroup) {
-                    if (method === 'multi_chunk') {
-                        chunksGroup.style.display = 'block';
-                    } else {
-                        chunksGroup.style.display = 'none';
-                    }
-                }
-            }
-            
-            // Make function global
-            window.toggleChunksInput = toggleChunksInput;
-            
-            // Initialize on load
-            setTimeout(toggleChunksInput, 100);
         });
     </script>
 </body>

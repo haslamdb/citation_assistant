@@ -327,11 +327,25 @@ class PDFIndexer:
 
         total_chunks = 0
         failed_files = 0
-        for pdf_path, file_key in tqdm(new_or_modified, desc="Indexing PDFs"):
-            chunks_indexed = self.index_pdf(pdf_path, file_key)
-            if chunks_indexed == 0:
-                failed_files += 1
-            total_chunks += chunks_indexed
+        # Check if we have a TTY (interactive terminal) for tqdm
+        # When running from web server, sys.stderr is not a TTY and causes BrokenPipeError
+        has_tty = sys.stderr.isatty() if hasattr(sys.stderr, 'isatty') else False
+
+        if has_tty:
+            # Use tqdm for interactive terminal
+            for pdf_path, file_key in tqdm(new_or_modified, desc="Indexing PDFs"):
+                chunks_indexed = self.index_pdf(pdf_path, file_key)
+                if chunks_indexed == 0:
+                    failed_files += 1
+                total_chunks += chunks_indexed
+        else:
+            # Print simple progress for non-interactive environments (web server)
+            for i, (pdf_path, file_key) in enumerate(new_or_modified):
+                print(f"Progress: {i+1}/{len(new_or_modified)} - {pdf_path.name}")
+                chunks_indexed = self.index_pdf(pdf_path, file_key)
+                if chunks_indexed == 0:
+                    failed_files += 1
+                total_chunks += chunks_indexed
 
         # Save state
         self._save_index_state()
