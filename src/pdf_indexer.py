@@ -24,6 +24,7 @@ import chromadb
 from chromadb.config import Settings
 from tqdm import tqdm
 import re
+import ollama
 
 
 class PDFIndexer:
@@ -37,7 +38,9 @@ class PDFIndexer:
         embedding_model: str = "pritamdeka/S-PubMedBert-MS-MARCO",
         use_semantic_chunking: bool = True,
         target_chunk_tokens: int = 512,
-        overlap_sentences: int = 2
+        overlap_sentences: int = 2,
+        use_llm_metadata: bool = True,
+        llm_model: str = "llama3.2:3b"
     ):
         self.endnote_pdf_dir = Path(endnote_pdf_dir)
         self.embeddings_dir = Path(embeddings_dir)
@@ -45,6 +48,8 @@ class PDFIndexer:
         self.use_semantic_chunking = use_semantic_chunking
         self.target_chunk_tokens = target_chunk_tokens
         self.overlap_sentences = overlap_sentences
+        self.use_llm_metadata = use_llm_metadata
+        self.llm_model = llm_model
 
         # Track indexed files
         self.index_state_file = self.embeddings_dir / "index_state.json"
@@ -98,6 +103,168 @@ class PDFIndexer:
         except Exception as e:
             print(f"Error extracting text from {pdf_path.name}: {e}")
             return ""
+    
+    def _extract_publication_year(self, pdf_path: Path, text: str) -> int:
+        """Extract publication year from PDF filename or text
+        
+        Args:
+            pdf_path: Path to the PDF file
+            text: Extracted text from the PDF
+            
+        Returns:
+            Publication year (1900-2099) or 0 if not found
+        """
+        import datetime
+        current_year = datetime.datetime.now().year
+        
+        # First, try to extract year from filename
+        filename = pdf_path.name
+        # Look for 4-digit years in filename (1900-2099)
+        year_matches = re.findall(r'\b(19\d{2}|20\d{2})\b', filename)
+        for year_str in year_matches:
+            year = int(year_str)
+            # Validate year is reasonable (not future, not too old)
+            if 1900 <= year <= current_year + 1:  # Allow 1 year in future for preprints
+                return year
+        
+        # If not found in filename, try to extract from first 2000 characters of text
+        # Look for common publication patterns
+        if text:
+            text_sample = text[:2000]
+            
+            # Common patterns: "Published: 2023", "© 2023", "Received: ... Accepted: ... Published: 2023"
+            # "Volume 45, 2023", "2023;", "(2023)"
+            patterns = [
+                r'(?:Published|Publication date|Pub Date|Copyright|©)[:\s]+.*?\b(19\d{2}|20\d{2})\b',
+                r'\b(19\d{2}|20\d{2})\b[;,]\s*(?:Volume|\d+\s*\()',  # Year followed by volume
+                r'(?:Accepted|Published online)[:\s]+.*?\b(19\d{2}|20\d{2})\b',
+                r'\(?\b(19\d{2}|20\d{2})\b\)?(?:\s*;|\s*\))',  # Year in parentheses or followed by semicolon
+            ]
+            
+            for pattern in patterns:
+                matches = re.findall(pattern, text_sample, re.IGNORECASE)
+                for year_str in matches:
+                    year = int(year_str)
+                    if 1900 <= year <= current_year + 1:
+                        return year
+            
+            # Last resort: find any 4-digit year in reasonable range
+            year_matches = re.findall(r'\b(19\d{2}|20\d{2})\b', text_sample)
+            valid_years = []
+            for year_str in year_matches:
+                year = int(year_str)
+                if 1900 <= year <= current_year + 1:
+                    valid_years.append(year)
+            
+            # Return the most recent valid year found (likely the publication year)
+            if valid_years:
+                return max(valid_years)
+        
+        return 0  # No year found
+    
+    def _extract_llm_metadata(self, text: str, pdf_path: Path) -> Dict:
+        """Extract rich metadata from PDF text using LLM
+        
+        Args:
+            text: Extracted text from the PDF (first ~3000 chars for efficiency)
+            pdf_path: Path to the PDF file
+            
+        Returns:
+            Dictionary with extracted metadata
+        """
+        if not self.use_llm_metadata:
+            return {}
+        
+        # Use first 3000 characters for metadata extraction (enough for abstract + intro)
+        text_sample = text[:3000] if text else ""
+        
+        if not text_sample:
+            return {}
+        
+        try:
+            prompt = f"""Analyze this research paper excerpt and extract the following metadata. Be concise and accurate.
+
+Paper excerpt:
+{text_sample}
+
+Please provide the following information in a structured format:
+
+1. CATEGORY: Choose ONE primary category from: 
+   [microbiology, immunology, genomics, bioinformatics, clinical_medicine, epidemiology, pharmacology, molecular_biology, cell_biology, biochemistry, neuroscience, public_health, infectious_diseases, cancer_research, computational_biology, other]
+
+2. KEYWORDS: List 5-8 specific keywords or phrases that best describe this paper's content (comma-separated)
+
+3. STUDY_TYPE: Choose ONE from:
+   [clinical_trial, cohort_study, case_control, systematic_review, meta_analysis, experimental, computational, observational, case_report, methodology, review, opinion, other]
+
+4. ORGANISM: Main organism(s) studied (e.g., human, mouse, E. coli, SARS-CoV-2, or 'multiple')
+
+5. DISEASE_FOCUS: Primary disease or condition studied (if applicable, otherwise 'none')
+
+6. METHODS: List 2-3 main methodological approaches used (e.g., RNA-seq, CRISPR, flow cytometry, etc.)
+
+7. IMPACT: Rate the potential impact/significance (high, medium, low) based on novelty and importance
+
+Format your response EXACTLY as follows (use these exact labels):
+CATEGORY: [your answer]
+KEYWORDS: [your answer]
+STUDY_TYPE: [your answer]
+ORGANISM: [your answer]
+DISEASE_FOCUS: [your answer]
+METHODS: [your answer]
+IMPACT: [your answer]"""
+
+            # Query Ollama for metadata extraction
+            response = ollama.chat(
+                model=self.llm_model,
+                messages=[{'role': 'user', 'content': prompt}],
+                options={'temperature': 0.1}  # Low temperature for consistent extraction
+            )
+            
+            # Parse the response
+            metadata = {}
+            response_text = response['message']['content']
+            
+            # Extract each field using regex
+            patterns = {
+                'category': r'CATEGORY:\s*([^\n]+)',
+                'keywords': r'KEYWORDS:\s*([^\n]+)',
+                'study_type': r'STUDY_TYPE:\s*([^\n]+)',
+                'organism': r'ORGANISM:\s*([^\n]+)',
+                'disease_focus': r'DISEASE_FOCUS:\s*([^\n]+)',
+                'methods': r'METHODS:\s*([^\n]+)',
+                'impact': r'IMPACT:\s*([^\n]+)'
+            }
+            
+            for field, pattern in patterns.items():
+                match = re.search(pattern, response_text, re.IGNORECASE)
+                if match:
+                    value = match.group(1).strip()
+                    # Clean up the value
+                    value = value.strip('[]').strip()
+                    
+                    # For keywords and methods, split into list
+                    if field in ['keywords', 'methods']:
+                        # Split by comma and clean each item
+                        items = [item.strip() for item in value.split(',')]
+                        metadata[field] = ', '.join(items[:8])  # Limit to 8 items
+                    else:
+                        # Normalize category values
+                        if field == 'category':
+                            value = value.lower().replace(' ', '_').replace('-', '_')
+                        elif field == 'study_type':
+                            value = value.lower().replace(' ', '_').replace('-', '_')
+                        elif field == 'impact':
+                            value = value.lower()
+                            if value not in ['high', 'medium', 'low']:
+                                value = 'medium'  # Default to medium if unclear
+                        metadata[field] = value
+            
+            return metadata
+            
+        except Exception as e:
+            print(f"  Warning: Could not extract LLM metadata: {e}")
+            return {}
 
     def _chunk_text(self, text: str, chunk_size: int = 1000, overlap: int = 200) -> List[str]:
         """Split text into overlapping chunks for better retrieval (DEPRECATED - use _chunk_text_semantic)"""
@@ -254,6 +421,18 @@ class PDFIndexer:
                 print(f"  Skipping (no text extracted)")
                 return 0
 
+            # Extract publication year
+            publication_year = self._extract_publication_year(pdf_path, text)
+            
+            # Extract LLM metadata if enabled
+            llm_metadata = {}
+            if self.use_llm_metadata:
+                print(f"  Extracting metadata with {self.llm_model}...")
+                llm_metadata = self._extract_llm_metadata(text, pdf_path)
+                if llm_metadata:
+                    print(f"    Category: {llm_metadata.get('category', 'unknown')}")
+                    print(f"    Keywords: {llm_metadata.get('keywords', 'none')[:50]}...")
+            
             # Chunk text (use semantic or character-based)
             if self.use_semantic_chunking:
                 chunks = self._chunk_text_semantic(text)
@@ -272,17 +451,37 @@ class PDFIndexer:
             # Prepare metadata
             doc_id_base = hashlib.md5(file_key.encode()).hexdigest()[:8]
             ids = [f"{doc_id_base}_chunk_{i}" for i in range(len(chunks))]
-            metadatas = [
-                {
-                    "source": file_key,
-                    "filename": pdf_path.name,
+            
+            # Base metadata for all chunks
+            base_metadata = {
+                "source": file_key,
+                "filename": pdf_path.name,
+                "chunking_method": chunking_method,
+                "publication_year": publication_year
+            }
+            
+            # Add LLM metadata if available
+            if llm_metadata:
+                base_metadata.update({
+                    "category": llm_metadata.get("category", ""),
+                    "keywords": llm_metadata.get("keywords", ""),
+                    "study_type": llm_metadata.get("study_type", ""),
+                    "organism": llm_metadata.get("organism", ""),
+                    "disease_focus": llm_metadata.get("disease_focus", ""),
+                    "methods": llm_metadata.get("methods", ""),
+                    "impact": llm_metadata.get("impact", "")
+                })
+            
+            # Create metadata for each chunk
+            metadatas = []
+            for i in range(len(chunks)):
+                chunk_metadata = base_metadata.copy()
+                chunk_metadata.update({
                     "chunk_index": i,
                     "total_chunks": len(chunks),
-                    "chunking_method": chunking_method,
                     "chunk_size_chars": len(chunks[i])
-                }
-                for i in range(len(chunks))
-            ]
+                })
+                metadatas.append(chunk_metadata)
 
             # Add to ChromaDB in batches to avoid size limit
             # ChromaDB has max batch size of ~5461, so we use 5000 to be safe

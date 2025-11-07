@@ -80,18 +80,22 @@ async def lifespan(app: FastAPI):
         print(f"  Error: {e}")
         assistant = None
 
-    # Initialize indexer with Phase 2 semantic chunking
+    # Initialize indexer with Phase 2 semantic chunking and LLM metadata
     indexer = PDFIndexer(
         endnote_pdf_dir=ENDNOTE_PDF_DIR,
         embeddings_dir=EMBEDDINGS_DIR,
         use_semantic_chunking=True,      # Phase 2 optimization
         target_chunk_tokens=512,         # Use full PubMedBERT capacity
-        overlap_sentences=2              # Semantic overlap
+        overlap_sentences=2,             # Semantic overlap
+        use_llm_metadata=True,           # Extract categories, keywords, etc.
+        llm_model="llama3.2:3b"          # Fast model for metadata extraction
     )
     print("✓ Indexer initialized")
     print(f"  • Semantic chunking: {indexer.use_semantic_chunking}")
     print(f"  • Target chunk size: {indexer.target_chunk_tokens} tokens")
     print(f"  • Sentence overlap: {indexer.overlap_sentences}")
+    print(f"  • LLM metadata extraction: {indexer.use_llm_metadata}")
+    print(f"  • LLM model: {indexer.llm_model}")
 
     print("\n⚠ SECURITY ENABLED ⚠")
     print("  - JWT Authentication required")

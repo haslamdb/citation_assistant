@@ -117,6 +117,8 @@ class CitationAssistant:
         query: str,
         n_results: int = 10,
         alpha: float = 0.5,
+        boost_recency: bool = True,
+        recency_weight: float = 0.15,
         **kwargs
     ) -> List[Dict]:
         """
@@ -141,7 +143,13 @@ class CitationAssistant:
 
         # Stage 1: Get vector search results (semantic similarity)
         # Fetch more candidates to ensure good coverage after merging
-        vector_papers = self.search_papers(query, n_results=n_results * 3, **kwargs)
+        vector_papers = self.search_papers(
+            query, 
+            n_results=n_results * 3, 
+            boost_recency=boost_recency,
+            recency_weight=recency_weight,
+            **kwargs
+        )
 
         # Stage 2: Get BM25 scores (keyword matching)
         # Tokenize query
@@ -187,7 +195,13 @@ class CitationAssistant:
         fetch_multiplier: int = None,
         max_fetch: int = None,
         keyword_boost_strength: float = None,
-        use_reranking: bool = None
+        use_reranking: bool = None,
+        boost_recency: bool = True,
+        recency_weight: float = 0.15,
+        filter_category: str = None,
+        filter_study_type: str = None,
+        filter_impact: str = None,
+        boost_metadata_keywords: bool = True
     ) -> List[Dict]:
         """Search for relevant papers given a query (deduplicated by filename)
 
@@ -201,6 +215,13 @@ class CitationAssistant:
             keyword_boost_strength: Boost factor for keyword matches (None = use default)
                 Lower = stronger boost. 0.7 = moderate, 0.5 = strong, 0.1 = very aggressive
             use_reranking: If True, use cross-encoder re-ranking (None = use instance setting)
+            boost_recency: If True, boost more recent papers (default: True)
+            recency_weight: Weight for recency boost (0-1, default: 0.15)
+                0.1 = subtle boost, 0.15 = moderate, 0.2+ = aggressive
+            filter_category: Filter by category (e.g., "microbiology", "immunology")
+            filter_study_type: Filter by study type (e.g., "clinical_trial", "meta_analysis")
+            filter_impact: Filter by impact level ("high", "medium", "low")
+            boost_metadata_keywords: If True, boost papers whose LLM keywords match query
         """
         # Use instance defaults if not specified
         if fetch_multiplier is None:
@@ -275,6 +296,31 @@ class CitationAssistant:
 
                 # Check for keyword matches (exact terms from query)
                 keyword_matches = sum(1 for term in query_terms if len(term) > 3 and term in text_lower)
+                
+                # Get publication year from metadata (0 if not found)
+                publication_year = results['metadatas'][0][i].get('publication_year', 0)
+                
+                # Get LLM metadata if available
+                metadata = results['metadatas'][0][i]
+                category = metadata.get('category', '')
+                llm_keywords = metadata.get('keywords', '')
+                study_type = metadata.get('study_type', '')
+                impact = metadata.get('impact', '')
+                
+                # Apply filters if specified
+                if filter_category and category != filter_category:
+                    continue
+                if filter_study_type and study_type != filter_study_type:
+                    continue
+                if filter_impact and impact != filter_impact:
+                    continue
+                
+                # Check for metadata keyword matches if boosting is enabled
+                metadata_keyword_matches = 0
+                if boost_metadata_keywords and llm_keywords:
+                    llm_keywords_lower = llm_keywords.lower()
+                    metadata_keyword_matches = sum(1 for term in query_terms 
+                                                 if len(term) > 3 and term in llm_keywords_lower)
 
                 unique_papers[filename] = {
                     'id': results['ids'][0][i],
@@ -285,7 +331,13 @@ class CitationAssistant:
                     'distance': distance,
                     'similarity': 1 / (1 + distance),  # Normalize L2 distance to 0-1 range
                     'has_haslam': has_haslam,
-                    'keyword_matches': keyword_matches
+                    'keyword_matches': keyword_matches,
+                    'publication_year': publication_year,
+                    'category': category,
+                    'study_type': study_type,
+                    'impact': impact,
+                    'llm_keywords': llm_keywords,
+                    'metadata_keyword_matches': metadata_keyword_matches
                 }
 
         # Apply keyword boost (stronger than Haslam boost for relevance)
@@ -296,6 +348,12 @@ class CitationAssistant:
                 # This prevents keyword matches from overwhelming semantic similarity
                 paper['distance'] *= keyword_boost_strength ** paper['keyword_matches']
                 paper['similarity'] = 1 / (1 + paper['distance'])
+            
+            # Apply boost for metadata keyword matches (gentler than text matches)
+            if boost_metadata_keywords and paper['metadata_keyword_matches'] > 0:
+                # Use a gentler boost for metadata keywords (0.85 default)
+                paper['distance'] *= 0.85 ** paper['metadata_keyword_matches']
+                paper['similarity'] = 1 / (1 + paper['distance'])
 
         # Apply Haslam boost to distances if enabled
         if boost_haslam:
@@ -304,6 +362,35 @@ class CitationAssistant:
                     # Reduce distance by 50% (strong boost for Haslam papers)
                     paper['distance'] = paper['distance'] * 0.5
                     paper['similarity'] = 1 / (1 + paper['distance'])
+        
+        # Apply recency boost if enabled
+        if boost_recency:
+            import datetime
+            current_year = datetime.datetime.now().year
+            
+            for paper in unique_papers.values():
+                pub_year = paper.get('publication_year', 0)
+                if pub_year > 0:
+                    # Calculate years since publication
+                    years_old = max(0, current_year - pub_year)
+                    
+                    # Recency factor: newer papers get lower multiplier (better score)
+                    # Formula: 1 - (recency_weight * decay_factor)
+                    # Where decay_factor approaches 1 for old papers and 0 for new papers
+                    # Using a smooth decay function that gives:
+                    # - 0 years old: full boost (1 - recency_weight)
+                    # - 5 years old: moderate penalty
+                    # - 10+ years old: minimal boost
+                    decay_factor = min(1.0, years_old / 10.0)  # Linear decay over 10 years
+                    recency_multiplier = 1 - (recency_weight * (1 - decay_factor))
+                    
+                    # Apply recency boost by reducing distance
+                    paper['distance'] = paper['distance'] * recency_multiplier
+                    paper['similarity'] = 1 / (1 + paper['distance'])
+                    paper['recency_boost_applied'] = True
+                    paper['years_old'] = years_old
+                else:
+                    paper['recency_boost_applied'] = False
 
         # Convert to list and sort by distance (best matches first)
         papers = sorted(unique_papers.values(), key=lambda x: x['distance'])
