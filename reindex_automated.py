@@ -23,7 +23,7 @@ def main():
     
     # Settings for automated run
     USE_LLM = True
-    LLM_MODEL = "llama3.2:3b"  # Fast model
+    LLM_MODEL = "gemma2:27b"  # Using available model
     AUTO_CONFIRM = True  # Skip confirmations
     
     print("="*80)

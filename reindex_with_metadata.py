@@ -39,20 +39,20 @@ def main():
     print("\n" + "-"*40)
     print("SELECT LLM MODEL FOR METADATA EXTRACTION")
     print("-"*40)
-    print("1. llama3.2:3b (Fast, good quality)")
-    print("2. gemma2:9b (Slower, better quality)")
-    print("3. gemma2:27b (Slowest, best quality)")
+    print("1. gemma2:27b (Available - good quality)")
+    print("2. llama3.1:70b (Available - best quality, slower)")
+    print("3. qwen2.5:72b-instruct-q4_K_M (Available - large, slowest)")
     print("4. Skip LLM metadata (only extract year)")
     
     choice = input("\nEnter choice (1-4) [default: 1]: ").strip() or "1"
     
-    llm_model = "llama3.2:3b"
+    llm_model = "gemma2:27b"  # Default to available model
     use_llm = True
     
     if choice == "2":
-        llm_model = "gemma2:9b"
+        llm_model = "llama3.1:70b"
     elif choice == "3":
-        llm_model = "gemma2:27b"
+        llm_model = "qwen2.5:72b-instruct-q4_K_M"
     elif choice == "4":
         use_llm = False
         print("\n⚠ LLM metadata extraction disabled")

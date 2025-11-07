@@ -40,7 +40,7 @@ class PDFIndexer:
         target_chunk_tokens: int = 512,
         overlap_sentences: int = 2,
         use_llm_metadata: bool = True,
-        llm_model: str = "llama3.2:3b"
+        llm_model: str = "gemma2:27b"
     ):
         self.endnote_pdf_dir = Path(endnote_pdf_dir)
         self.embeddings_dir = Path(embeddings_dir)
