@@ -7,21 +7,13 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from src.citation_assistant import CitationAssistant, GlobalConfig
+from src.citation_assistant import CitationAssistant
 
 def test_golgicide_search():
     """Test that searching for 'golgicide A' actually finds papers about golgicide A"""
-    
-    config = GlobalConfig(
-        n_papers=10,
-        chunks_per_paper=1,
-        enable_hybrid=True,
-        hybrid_balance=0.5
-    )
-    
+
     assistant = CitationAssistant(
-        embeddings_dir="/fastpool/rag_embeddings",
-        config=config
+        embeddings_dir="/fastpool/rag_embeddings"
     )
     
     query = "golgicide A"
